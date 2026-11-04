@@ -8,7 +8,7 @@ switch ($Task) {
     "reset"    { docker compose down -v }   # deletes the database data
     "psql"     { docker compose exec db psql -U relayguard -d relayguard }
     "receiver" { go run ./cmd/receiver }
-    "listen"   { stripe listen --forward-to 127.0.0.1:8080/webhooks/stripe }
+        "listen"   { stripe listen --all-snapshot --forward-to 127.0.0.1:8080/webhooks/stripe }
     "trigger"  { stripe trigger payment_intent.succeeded }
     "test"     { go vet ./...; if ($LASTEXITCODE -eq 0) { go test ./... } }
     default {
