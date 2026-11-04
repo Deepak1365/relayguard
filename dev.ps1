@@ -6,7 +6,11 @@ param(
     [Parameter(Position = 2)][int]$Count = 1
 )
 
-$Url = "http://127.0.0.1:8080/webhooks/stripe"
+function Invoke-Sql([string[]]$Queries) {
+    $sqlArgs = @("compose", "exec", "db", "psql", "-U", "relayguard", "-d", "relayguard", "-P", "pager=off")
+    foreach ($q in $Queries) { $sqlArgs += @("-c", $q) }
+    & docker @sqlArgs
+}
 
 switch ($Task) {
     "up"             { docker compose up -d }
@@ -17,31 +21,25 @@ switch ($Task) {
     "migrate-status" { go run ./cmd/migrate status }
     "migrate-down"   { go run ./cmd/migrate down }
     "receiver"       { go run ./cmd/receiver }
+    "worker"         { go run ./cmd/worker }
     "naive"          { go run ./cmd/naive }
     "listen"         { stripe listen --all-snapshot --forward-to 127.0.0.1:8080/webhooks/stripe }
     "trigger"        { stripe trigger customer.created }
     "send" {
         if (-not $Path) { Write-Host "Usage: .\dev.ps1 send <file.json> [count]"; break }
-        for ($i = 1; $i -le $Count; $i++) {
-            try {
-                $r = Invoke-WebRequest -Method Post -Uri $Url -ContentType "application/json" -InFile $Path -UseBasicParsing
-                Write-Host "attempt $i -> HTTP $($r.StatusCode)"
-            } catch {
-                if ($_.Exception.Response) {
-                    Write-Host "attempt $i -> HTTP $($_.Exception.Response.StatusCode.value__)"
-                } else {
-                    Write-Host "attempt $i -> no response ($($_.Exception.Message))"
-                }
-            }
-        }
+        go run ./cmd/sendevent -file $Path -n $Count
     }
     "state" {
-        docker compose exec db psql -U relayguard -d relayguard -P pager=off `
-            -c "SELECT c.stripe_customer_id, c.credit_balance, count(g.id) AS grants, COALESCE(sum(g.amount), 0) AS ledger_total FROM customers c LEFT JOIN credit_grants g ON g.customer_id = c.id GROUP BY c.id ORDER BY c.id;" `
-            -c "SELECT stripe_subscription_id, status, updated_at FROM subscriptions ORDER BY id;"
+        Invoke-Sql @(
+            "SELECT c.stripe_customer_id, c.credit_balance, count(g.id) AS grants, COALESCE(sum(g.amount), 0) AS ledger_total FROM customers c LEFT JOIN credit_grants g ON g.customer_id = c.id GROUP BY c.id ORDER BY c.id;",
+            "SELECT stripe_subscription_id, status, updated_at FROM subscriptions ORDER BY id;"
+        )
+    }
+    "inbox" {
+        Invoke-Sql @("SELECT id, event_id, event_type, status, attempts, left(last_error, 50) AS last_error FROM inbox ORDER BY id;")
     }
     "reset-data" {
-        docker compose exec db psql -U relayguard -d relayguard -c "TRUNCATE subscriptions, credit_grants, customers RESTART IDENTITY;"
+        Invoke-Sql @("TRUNCATE inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")
     }
     "test"           { go vet ./...; if ($LASTEXITCODE -eq 0) { go test ./... } }
     default {
@@ -49,12 +47,14 @@ switch ($Task) {
         Write-Host "  up / down / reset      Postgres (reset DELETES data)"
         Write-Host "  psql                   SQL shell"
         Write-Host "  migrate                apply schema (also: migrate-status, migrate-down)"
-        Write-Host "  receiver               smoke-test receiver"
-        Write-Host "  naive                  NAIVE baseline receiver"
+        Write-Host "  receiver               RelayGuard receiver (verify + store)"
+        Write-Host "  worker                 RelayGuard worker (apply events)"
+        Write-Host "  naive                  NAIVE baseline receiver (same port as receiver)"
         Write-Host "  listen / trigger       Stripe CLI forwarding / test event"
-        Write-Host "  send <file> [count]    POST a fixture event, optionally several times"
-        Write-Host "  state                  show balances, ledger and subscriptions"
-        Write-Host "  reset-data             empty the app tables (keeps schema)"
+        Write-Host "  send <file> [count]    sign and POST a fixture event"
+        Write-Host "  state                  balances, ledger, subscriptions"
+        Write-Host "  inbox                  inbox rows: status, attempts, errors"
+        Write-Host "  reset-data             empty app tables and inbox (keeps schema)"
         Write-Host "  test                   go vet + go test"
     }
 }
