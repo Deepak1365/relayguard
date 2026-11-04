@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: relayguard
+      POSTGRES_PASSWORD: relayguard
+      POSTGRES_DB: relayguard
+    ports:
+      - "5433:5432"   # 5433 on your machine avoids clashing with any local Postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relayguard -d relayguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
