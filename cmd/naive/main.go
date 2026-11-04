@@ -8,6 +8,9 @@
 //   - applies events in arrival order, so a late, older event overwrites newer state
 //
 // RelayGuard is measured against this program. Do not "fix" it.
+//
+// Fault points for experiments: "after_grant" (between the two invoice writes)
+// and "before_response" (writes done, 200 not yet sent, so the provider resends).
 package main
 
 import (
@@ -25,6 +28,7 @@ import (
 
 	"github.com/Deepak1365/relayguard/internal/config"
 	"github.com/Deepak1365/relayguard/internal/db"
+	"github.com/Deepak1365/relayguard/internal/fault"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -34,8 +38,8 @@ var (
 )
 
 type server struct {
-	pool            *pgxpool.Pool
-	crashAfterGrant bool // fault injection: exit between the two invoice writes
+	pool   *pgxpool.Pool
+	faults *fault.Injector
 }
 
 func main() {
@@ -57,13 +61,14 @@ func main() {
 	}
 	defer pool.Close()
 
-	s := &server{
-		pool:            pool,
-		crashAfterGrant: os.Getenv("NAIVE_CRASH_AFTER_GRANT") == "1",
+	faults := fault.FromEnv()
+	if os.Getenv("NAIVE_CRASH_AFTER_GRANT") == "1" {
+		faults = fault.Always("after_grant")
 	}
-	if s.crashAfterGrant {
-		log.Println("FAULT INJECTION ON: will crash after inserting a credit grant")
+	if faults.Enabled() {
+		log.Printf("FAULT INJECTION ON: %s", faults)
 	}
+	s := &server{pool: pool, faults: faults}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +106,7 @@ func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		log.Printf("FAILED %s (%s): %v", evt.ID, evt.Type, err)
 		http.Error(w, "processing failed", http.StatusInternalServerError)
 	default:
+		s.faults.Maybe("before_response")
 		log.Printf("applied %s (%s)", evt.ID, evt.Type)
 		w.WriteHeader(http.StatusOK)
 	}
@@ -135,10 +141,7 @@ func (s *server) apply(ctx context.Context, evt stripeevent.Event) error {
 			customerID, inv.ID, credits); err != nil {
 			return fmt.Errorf("insert grant: %w", err)
 		}
-		if s.crashAfterGrant {
-			log.Printf("FAULT: crashing after grant for %s, before balance update", evt.ID)
-			os.Exit(1)
-		}
+		s.faults.Maybe("after_grant")
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE customers SET credit_balance = credit_balance + $1 WHERE id = $2`,
 			credits, customerID); err != nil {

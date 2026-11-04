@@ -11,9 +11,31 @@ import (
 
 // Sender signs payloads like Stripe and POSTs them to a receiver.
 type Sender struct {
-	URL    string
-	Secret string
-	Client *http.Client
+	URL       string
+	Secret    string
+	HealthURL string // optional; used to wait while a crashed receiver restarts
+	Client    *http.Client
+}
+
+// WaitHealthy polls HealthURL until it answers 200 or the timeout passes.
+func (s *Sender) WaitHealthy(timeout time.Duration) bool {
+	if s.HealthURL == "" {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		resp, err := s.Client.Get(s.HealthURL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (s *Sender) Send(payload []byte) (int, error) {
@@ -60,6 +82,11 @@ func Deliver(s *Sender, plan []Event, maxRetries int) DeliveryStats {
 		if err == nil && status >= 200 && status < 300 {
 			stats.Accepted++
 			continue
+		}
+		if err != nil {
+			// Receiver unreachable (e.g. crashed and restarting): a real provider
+			// would retry later, so give it a moment before continuing.
+			s.WaitHealthy(5 * time.Second)
 		}
 		if p.retries < maxRetries {
 			p.retries++

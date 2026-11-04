@@ -42,6 +42,12 @@ switch ($Task) {
         Invoke-Sql @("TRUNCATE inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")
     }
     "test"           { go vet ./...; if ($LASTEXITCODE -eq 0) { go test ./... } }
+    "build" {
+        go build -o bin\worker.exe ./cmd/worker
+        go build -o bin\naive.exe ./cmd/naive
+        go build -o bin\chaos.exe ./cmd/chaos
+        if ($LASTEXITCODE -eq 0) { Write-Host "built bin\worker.exe, bin\naive.exe, bin\chaos.exe" }
+    }
     default {
         Write-Host "Tasks:"
         Write-Host "  up / down / reset      Postgres (reset DELETES data)"
@@ -56,5 +62,6 @@ switch ($Task) {
         Write-Host "  inbox                  inbox rows: status, attempts, errors"
         Write-Host "  reset-data             empty app tables and inbox (keeps schema)"
         Write-Host "  test                   go vet + go test"
+        Write-Host "  build                  build worker, naive and chaos into bin\"
     }
 }

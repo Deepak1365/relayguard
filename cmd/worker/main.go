@@ -20,6 +20,7 @@ import (
 	"github.com/Deepak1365/relayguard/internal/app"
 	"github.com/Deepak1365/relayguard/internal/config"
 	"github.com/Deepak1365/relayguard/internal/db"
+	"github.com/Deepak1365/relayguard/internal/fault"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -30,8 +31,9 @@ const (
 )
 
 type worker struct {
-	pool  *pgxpool.Pool
-	hooks app.Hooks
+	pool   *pgxpool.Pool
+	hooks  app.Hooks
+	faults *fault.Injector
 }
 
 func main() {
@@ -52,13 +54,20 @@ func main() {
 	}
 	defer pool.Close()
 
-	w := &worker{pool: pool}
+	// Fault points: "after_grant" (between the two invoice writes) and
+	// "before_commit" (effect applied, inbox row not yet marked done).
+	// Both are inside the transaction, so a crash there must roll back cleanly.
+	faults := fault.FromEnv()
 	if os.Getenv("WORKER_CRASH_AFTER_GRANT") == "1" {
-		log.Println("FAULT INJECTION ON: worker will crash after inserting a credit grant")
-		w.hooks.AfterGrant = func(eventID string) {
-			log.Printf("FAULT: crashing mid-transaction while applying %s", eventID)
-			os.Exit(1)
-		}
+		faults = fault.Always("after_grant")
+	}
+	if faults.Enabled() {
+		log.Printf("FAULT INJECTION ON: %s", faults)
+	}
+	w := &worker{
+		pool:   pool,
+		faults: faults,
+		hooks:  app.Hooks{AfterGrant: func(string) { faults.Maybe("after_grant") }},
 	}
 
 	log.Println("RelayGuard worker started")
@@ -128,6 +137,7 @@ func (w *worker) processOne(ctx context.Context) (bool, error) {
 		if err := sp.Commit(ctx); err != nil {
 			return false, fmt.Errorf("release savepoint: %w", err)
 		}
+		w.faults.Maybe("before_commit")
 		log.Printf("applied %s (%s)", evt.ID, evt.Type)
 		return true, finish(ctx, tx, id, "done", "")
 
