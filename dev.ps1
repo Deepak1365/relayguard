@@ -32,11 +32,11 @@ switch ($Task) {
     "state" {
         Invoke-Sql @(
             "SELECT c.stripe_customer_id, c.credit_balance, count(g.id) AS grants, COALESCE(sum(g.amount), 0) AS ledger_total FROM customers c LEFT JOIN credit_grants g ON g.customer_id = c.id GROUP BY c.id ORDER BY c.id;",
-            "SELECT stripe_subscription_id, status, updated_at FROM subscriptions ORDER BY id;"
+            "SELECT stripe_subscription_id, status, last_event_id, last_event_created FROM subscriptions ORDER BY id;"
         )
     }
     "inbox" {
-        Invoke-Sql @("SELECT id, event_id, event_type, status, attempts, left(last_error, 50) AS last_error FROM inbox ORDER BY id;")
+        Invoke-Sql @("SELECT id, event_id, event_type, status, attempts, left(last_error, 70) AS last_error FROM inbox ORDER BY id;")
     }
     "reset-data" {
         Invoke-Sql @("TRUNCATE inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")

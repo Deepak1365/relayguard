@@ -136,6 +136,11 @@ func (w *worker) processOne(ctx context.Context) (bool, error) {
 		log.Printf("skipped %s (%s)", evt.ID, evt.Type)
 		return true, finish(ctx, tx, id, "skipped", "")
 
+	case errors.Is(applyErr, app.ErrStale):
+		sp.Rollback(ctx) // nothing was written, but release the savepoint
+		log.Printf("stale %s (%s): %v", evt.ID, evt.Type, applyErr)
+		return true, finish(ctx, tx, id, "stale", applyErr.Error())
+
 	default:
 		if err := sp.Rollback(ctx); err != nil {
 			return false, fmt.Errorf("rollback savepoint: %w", err)

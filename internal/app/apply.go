@@ -17,6 +17,9 @@ import (
 var (
 	ErrUnknownCustomer = errors.New("unknown customer")
 	ErrUnhandledType   = errors.New("unhandled event type")
+	// ErrStale means a newer event has already been applied to the same object.
+	// The event is recorded but deliberately not applied.
+	ErrStale = errors.New("stale event")
 )
 
 // Hooks lets experiments inject faults at precise points.
@@ -75,14 +78,37 @@ func Apply(ctx context.Context, tx pgx.Tx, evt stripeevent.Event, hooks Hooks) e
 		if err != nil {
 			return err
 		}
-		// Still last-write-wins in processing order; ordering is fixed in phase 3.
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO subscriptions (stripe_subscription_id, customer_id, status)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (stripe_subscription_id)
-			DO UPDATE SET status = EXCLUDED.status, updated_at = now()`,
-			sub.ID, customerID, sub.Status); err != nil {
+		// Apply only if this event is not older than the one the row already
+		// reflects. ON CONFLICT ... WHERE false updates nothing, so a stale event
+		// affects 0 rows. Postgres locks the conflicting row and re-checks the
+		// WHERE against the latest committed version, so this is also safe with
+		// several workers. Equal timestamps (same second) still apply: Stripe's
+		// "created" cannot order them, which is a documented limitation.
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO subscriptions
+				(stripe_subscription_id, customer_id, status, last_event_created, last_event_id)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (stripe_subscription_id) DO UPDATE
+			SET status             = EXCLUDED.status,
+			    last_event_created = EXCLUDED.last_event_created,
+			    last_event_id      = EXCLUDED.last_event_id,
+			    updated_at         = now()
+			WHERE subscriptions.last_event_created <= EXCLUDED.last_event_created`,
+			sub.ID, customerID, sub.Status, evt.Created, evt.ID)
+		if err != nil {
 			return fmt.Errorf("upsert subscription: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			var newerID string
+			var newerCreated int64
+			if err := tx.QueryRow(ctx, `
+				SELECT COALESCE(last_event_id, ''), last_event_created
+				FROM subscriptions WHERE stripe_subscription_id = $1`,
+				sub.ID).Scan(&newerID, &newerCreated); err != nil {
+				return fmt.Errorf("read current subscription: %w", err)
+			}
+			return fmt.Errorf("%w: %s already reflects %s (created %d), this event created %d",
+				ErrStale, sub.ID, newerID, newerCreated, evt.Created)
 		}
 		return nil
 
