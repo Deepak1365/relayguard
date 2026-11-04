@@ -1,6 +1,6 @@
 # Phase 3 results: ordering for state-overwriting events
 
-Synthetic fixtures (`testdata/events/`), signed with the local webhook secret, local machine, run on: YYYY-MM-DD.
+Synthetic fixtures (`testdata/events/`), signed with the local webhook secret, local machine, run on: 2026-11-04.
 Start each experiment with `.\dev.ps1 reset-data`.
 
 | # | Scenario | Correct outcome | Naive | Phase 2 | Phase 3 |
@@ -12,13 +12,38 @@ Start each experiment with `.\dev.ps1 reset-data`.
 ## 4. Stale overwrite
 
 ```text
-paste .\dev.ps1 state and .\dev.ps1 inbox output, plus the worker's "stale" log line
+ stripe_customer_id | credit_balance | grants | ledger_total
+--------------------+----------------+--------+--------------
+ cus_fx_1           |              0 |      0 |            0
+(1 row)
+
+ stripe_subscription_id |  status  |    last_event_id    | last_event_created
+------------------------+----------+---------------------+--------------------
+ sub_fx_1               | canceled | evt_fx_sub_canceled |         1793800300
+(1 row)
+
+PS C:\dev\relayguard> .\dev.ps1 inbox
+ id |      event_id       |          event_type           | status | attempts |                               last_error
+----+---------------------+-------------------------------+--------+----------+------------------------------------------------------------------------
+  1 | evt_fx_customer_1   | customer.created              | done   |        1 |
+  2 | evt_fx_sub_canceled | customer.subscription.deleted | done   |        1 |
+  3 | evt_fx_sub_active   | customer.subscription.updated | stale  |        1 | stale event: sub_fx_1 already reflects evt_fx_sub_canceled (created 17
+(3 rows)
 ```
 
 ## 5. In-order delivery still applies
 
 ```text
-paste output
+ stripe_customer_id | credit_balance | grants | ledger_total
+--------------------+----------------+--------+--------------
+ cus_fx_1           |              0 |      0 |            0
+(1 row)
+
+ stripe_subscription_id |  status  |    last_event_id    | last_event_created
+------------------------+----------+---------------------+--------------------
+ sub_fx_1               | canceled | evt_fx_sub_canceled |         1793800300
+(1 row)
+
 ```
 
 ## Known limitations
