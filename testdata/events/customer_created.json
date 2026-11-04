@@ -1,0 +1,13 @@
+{
+  "id": "evt_fx_customer_1",
+  "object": "event",
+  "type": "customer.created",
+  "created": 1793800000,
+  "data": {
+    "object": {
+      "id": "cus_fx_1",
+      "object": "customer",
+      "email": "alice@example.com"
+    }
+  }
+}

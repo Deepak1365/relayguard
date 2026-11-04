@@ -1,0 +1,14 @@
+{
+  "id": "evt_fx_sub_active",
+  "object": "event",
+  "type": "customer.subscription.updated",
+  "created": 1793800120,
+  "data": {
+    "object": {
+      "id": "sub_fx_1",
+      "object": "subscription",
+      "customer": "cus_fx_1",
+      "status": "active"
+    }
+  }
+}

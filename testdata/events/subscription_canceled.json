@@ -1,0 +1,14 @@
+{
+  "id": "evt_fx_sub_canceled",
+  "object": "event",
+  "type": "customer.subscription.deleted",
+  "created": 1793800300,
+  "data": {
+    "object": {
+      "id": "sub_fx_1",
+      "object": "subscription",
+      "customer": "cus_fx_1",
+      "status": "canceled"
+    }
+  }
+}

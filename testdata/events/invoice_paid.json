@@ -1,0 +1,14 @@
+{
+  "id": "evt_fx_invoice_1",
+  "object": "event",
+  "type": "invoice.paid",
+  "created": 1793800060,
+  "data": {
+    "object": {
+      "id": "in_fx_1",
+      "object": "invoice",
+      "customer": "cus_fx_1",
+      "amount_paid": 2000
+    }
+  }
+}
