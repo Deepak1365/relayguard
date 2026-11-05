@@ -29,12 +29,14 @@ worker errors and no dead-lettered events.
 
 | Scenario | Flags | RelayGuard violations | Naive violations |
 |---|---|---|---|
-| No faults (harness sanity check) | none | _fill in_ | _fill in_ |
-| Duplicates | `-dup 0.2` | _fill in_ | _fill in_ |
-| Reordering | `-reorder 10` | _fill in_ | _fill in_ |
-| Both | `-dup 0.2 -reorder 10` | _fill in_ | 62 (seeds 1-5: 19, 13, 12, 11, 7) |
+| No faults (harness sanity check) | none | 0 (0/5 seeds failing) | 0 (0/5 seeds failing) |
+| Duplicates | `-dup 0.2` | 0 (0/5) | 48 (5/5 seeds failing; per seed: 16, 6, 12, 10, 4) |
+| Reordering | `-reorder 10` | 0 (0/5) | 8 (3/5 seeds failing; per seed: 3, 2, 0, 0, 3) |
+| Both | `-dup 0.2 -reorder 10` | not run separately; see part 2 (0 with crashes added) | 62 (5/5 seeds failing; per seed: 19, 13, 12, 11, 7) |
 
-"No faults" must give 0 for both targets; otherwise the harness or the model would be wrong.
+"No faults" gave 0 for both targets, as it must: the harness does not invent failures.
+Reordering alone hurt the naive receiver less often than duplicates (two seeds came out correct),
+because only some reorderings land an event before its prerequisite or an older status after a newer one.
 
 ## Notes and limitations
 
