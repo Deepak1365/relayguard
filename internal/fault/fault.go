@@ -5,6 +5,7 @@
 //
 //	FAULT_CRASH_RATE  probability (0..1) of crashing each time a fault point is reached
 //	FAULT_SEED        seed for the random choices (defaults to the current time)
+//	FAULT_POISON      "1" makes events of type PoisonType crash the worker every time
 package fault
 
 import (
@@ -73,3 +74,9 @@ func (i *Injector) Maybe(point string) {
 		os.Exit(1)
 	}
 }
+
+// PoisonType is an event type that, when FAULT_POISON=1, crashes the worker
+// every time it is processed. It simulates an event that triggers a bug.
+const PoisonType = "test.poison"
+
+func PoisonEnabled() bool { return os.Getenv("FAULT_POISON") == "1" }

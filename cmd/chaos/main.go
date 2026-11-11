@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"debug/buildinfo"
 	"flag"
 	"fmt"
 	"log"
@@ -28,6 +29,10 @@ import (
 	"github.com/Deepak1365/relayguard/internal/db"
 	"github.com/Deepak1365/relayguard/internal/sim"
 )
+
+// workerMaxAttempts must match maxAttempts in cmd/worker: a dead-lettered
+// poison event should record exactly this many attempts.
+const workerMaxAttempts = 8
 
 type runResult struct {
 	seed       int64
@@ -48,6 +53,8 @@ func main() {
 	dup := flag.Float64("dup", 0, "probability each event is delivered twice (0 to 1)")
 	reorder := flag.Int("reorder", 0, "max positions an event can move from its true order (0 = in order)")
 	providerRetries := flag.Int("provider-retries", 3, "how often a rejected delivery is resent, like a provider would")
+	poison := flag.Int("poison", 0, "events per seed that crash the worker every time (relayguard, needs -supervise)")
+	lease := flag.Duration("lease", time.Second, "WORKER_LEASE for the supervised worker (short keeps runs fast)")
 	supervise := flag.String("supervise", "", "built worker (relayguard) or naive receiver (naive) for the harness to run, crash and restart")
 	crashRate := flag.Float64("crash-rate", 0, "probability of crashing at each fault point (needs -supervise)")
 	killInterval := flag.Duration("kill-interval", 0, "average time between hard kills, e.g. 2s (needs -supervise)")
@@ -61,8 +68,11 @@ func main() {
 	if *target != "relayguard" && *target != "naive" {
 		log.Fatalf("-target must be relayguard or naive, got %q", *target)
 	}
-	if (*crashRate > 0 || *killInterval > 0) && *supervise == "" {
-		log.Fatal("-crash-rate and -kill-interval need -supervise")
+	if (*crashRate > 0 || *killInterval > 0 || *poison > 0) && *supervise == "" {
+		log.Fatal("-crash-rate, -kill-interval and -poison need -supervise")
+	}
+	if *poison > 0 && *target != "relayguard" {
+		log.Fatal("-poison only applies to -target relayguard")
 	}
 	seeds, err := parseSeeds(*seedsFlag, *seed)
 	if err != nil {
@@ -89,6 +99,10 @@ func main() {
 		sup = &sim.Supervisor{
 			Path: *supervise, LogPath: filepath.Join("bin", "supervised.log"),
 			CrashRate: *crashRate, KillInterval: *killInterval, Seed: seeds[0],
+			ExtraEnv: []string{"WORKER_LEASE=" + lease.String()},
+		}
+		if *poison > 0 {
+			sup.ExtraEnv = append(sup.ExtraEnv, "FAULT_POISON=1")
 		}
 		if err := sup.Start(); err != nil {
 			log.Fatalf("supervisor: %v", err)
@@ -111,10 +125,10 @@ func main() {
 	cfg := sim.DefaultConfig()
 	cfg.Customers = *customers
 	cfg.MaxInvoices = *maxInvoices
-	opts := sim.ChaosOptions{DuplicateRate: *dup, ReorderWindow: *reorder}
+	opts := sim.ChaosOptions{DuplicateRate: *dup, ReorderWindow: *reorder, Poison: *poison}
 
-	fmt.Printf("target=%s seeds=%d-%d customers=%d dup=%.2f reorder=%d crash-rate=%.2f kill-interval=%s supervise=%q\n",
-		*target, seeds[0], seeds[len(seeds)-1], *customers, *dup, *reorder, *crashRate, *killInterval, *supervise)
+	fmt.Printf("target=%s seeds=%d-%d customers=%d dup=%.2f reorder=%d poison=%d crash-rate=%.2f kill-interval=%s supervise=%q\n",
+		*target, seeds[0], seeds[len(seeds)-1], *customers, *dup, *reorder, *poison, *crashRate, *killInterval, *supervise)
 
 	var results []runResult
 	for _, s := range seeds {
@@ -143,7 +157,20 @@ func main() {
 		*target, len(results), failing, total, restarts, kills)
 
 	if *out != "" {
-		if err := writeMarkdown(*out, *target, results, failing, total, restarts, kills); err != nil {
+		// -lease only reaches a worker the harness starts itself; with an
+		// externally run worker, printing it would describe a setting that was
+		// never applied.
+		leaseLine := "- Worker lease: n/a (worker not supervised by the harness)"
+		if *supervise != "" && *target == "relayguard" {
+			leaseLine = fmt.Sprintf("- Worker lease: %s", *lease)
+		}
+		meta := []string{
+			fmt.Sprintf("%s, poison events per seed: %d", leaseLine, *poison),
+		}
+		if *supervise != "" {
+			meta = append(meta, "- Worker binary: "+binaryBuildInfo(*supervise))
+		}
+		if err := writeMarkdown(*out, *target, meta, results, failing, total, restarts, kills); err != nil {
 			log.Printf("writing %s: %v", *out, err)
 		} else {
 			fmt.Printf("wrote %s\n", *out)
@@ -182,8 +209,34 @@ func runOne(ctx context.Context, pool *pgxpool.Pool, sender *sim.Sender, target 
 		if n := counts["pending"]; n > 0 {
 			extra = append(extra, sim.Violation{Kind: "unprocessed_event", Subject: "inbox", Detail: fmt.Sprintf("%d events still pending (is a worker running?)", n)})
 		}
-		if n := counts["dead"]; n > 0 {
-			extra = append(extra, sim.Violation{Kind: "unprocessed_event", Subject: "inbox", Detail: fmt.Sprintf("%d events dead-lettered", n)})
+		// Exactly the poison events must be dead-lettered; nothing else.
+		dead, err := sim.DeadEvents(ctx, pool)
+		if err != nil {
+			return r, fmt.Errorf("dead events: %w", err)
+		}
+		poisonIDs := map[string]bool{}
+		for k := 0; k < opts.Poison; k++ {
+			poisonIDs[sim.PoisonID(seed, k)] = true
+		}
+		deadSet := map[string]bool{}
+		for _, d := range dead {
+			deadSet[d.ID] = true
+			if !poisonIDs[d.ID] {
+				extra = append(extra, sim.Violation{Kind: "unexpected_dead", Subject: d.ID, Detail: "dead-lettered but not a poison event"})
+				continue
+			}
+			// A poison event must be given up on after exactly the worker's
+			// maximum, with a reason, however many claims crashes and kills cost.
+			if d.Attempts != workerMaxAttempts || d.LastError == "" {
+				extra = append(extra, sim.Violation{Kind: "poison_wrong_attempts", Subject: d.ID,
+					Detail: fmt.Sprintf("dead with attempts=%d (want %d), last_error empty=%v", d.Attempts, workerMaxAttempts, d.LastError == "")})
+			}
+		}
+		// Loop over k, not the map, so violations come out in a stable order.
+		for k := 0; k < opts.Poison; k++ {
+			if id := sim.PoisonID(seed, k); !deadSet[id] {
+				extra = append(extra, sim.Violation{Kind: "poison_not_dead", Subject: id, Detail: "poison event was not dead-lettered"})
+			}
 		}
 	} else {
 		counts, err := sim.InboxCounts(ctx, pool)
@@ -224,7 +277,9 @@ func printRun(r runResult, examples bool) {
 	}
 }
 
-func writeMarkdown(path, target string, results []runResult, failing, total, restarts, kills int) error {
+// writeMarkdown writes a results file. meta holds extra header lines
+// (each starting with "- "), placed after the command line.
+func writeMarkdown(path, target string, meta []string, results []runResult, failing, total, restarts, kills int) error {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -235,6 +290,9 @@ func writeMarkdown(path, target string, results []runResult, failing, total, res
 	fmt.Fprintf(&b, "- Date: %s\n", time.Now().Format("2006-01-02 15:04"))
 	fmt.Fprintf(&b, "- Commit: `%s`\n", gitCommit())
 	fmt.Fprintf(&b, "- Command: `chaos %s`\n", strings.Join(os.Args[1:], " "))
+	for _, line := range meta {
+		b.WriteString(line + "\n")
+	}
 	fmt.Fprintf(&b, "- Data: synthetic seeded histories on a local machine (not production traffic)\n\n")
 	fmt.Fprintf(&b, "**Seeds: %d, failing seeds: %d, violations: %d, process restarts: %d (of which hard kills: %d)**\n\n",
 		len(results), failing, total, restarts, kills)
@@ -282,7 +340,41 @@ func gitCommit() string {
 	if err != nil {
 		return "unknown"
 	}
-	return strings.TrimSpace(string(out))
+	commit := strings.TrimSpace(string(out))
+	// A results file must not claim a commit it was not built from: uncommitted
+	// changes to tracked files mean the binary may differ from that commit.
+	// Untracked files (new results, scratch notes) do not count.
+	status, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output()
+	if err != nil {
+		return commit + "-unknown-status"
+	}
+	if strings.TrimSpace(string(status)) != "" {
+		commit += "-dirty"
+	}
+	return commit
+}
+
+// binaryBuildInfo reports the VCS stamp Go embedded in the supervised binary.
+// The harness's own commit says nothing about a binary built earlier, perhaps
+// from another commit or a dirty tree, so the binary must speak for itself.
+func binaryBuildInfo(path string) string {
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return "unknown"
+	}
+	settings := map[string]string{}
+	for _, s := range info.Settings {
+		settings[s.Key] = s.Value
+	}
+	rev, ok := settings["vcs.revision"]
+	if !ok {
+		return "unknown"
+	}
+	modified := settings["vcs.modified"]
+	if modified == "" {
+		modified = "unknown"
+	}
+	return fmt.Sprintf("vcs.revision=%s vcs.modified=%s", rev, modified)
 }
 
 func kindsSummary(vs []sim.Violation) string {

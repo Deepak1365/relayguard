@@ -20,6 +20,7 @@ type Supervisor struct {
 	CrashRate    float64       // passed to the program as FAULT_CRASH_RATE
 	KillInterval time.Duration // average time between hard kills; 0 = none
 	Seed         int64
+	ExtraEnv     []string // e.g. WORKER_LEASE=1s, FAULT_POISON=1
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -51,7 +52,7 @@ func (s *Supervisor) run(ctx context.Context, logFile *os.File) {
 		s.mu.Lock()
 		s.starts++
 		cmd := exec.Command(s.Path)
-		cmd.Env = append(cleanEnv(),
+		cmd.Env = append(append(cleanEnv(), s.ExtraEnv...),
 			fmt.Sprintf("FAULT_CRASH_RATE=%g", s.CrashRate),
 			fmt.Sprintf("FAULT_SEED=%d", s.Seed*100000+int64(s.starts)))
 		cmd.Stdout = logFile

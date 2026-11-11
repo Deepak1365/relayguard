@@ -41,7 +41,22 @@ switch ($Task) {
     "reset-data" {
         Invoke-Sql @("TRUNCATE inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")
     }
-    "test"           { go vet ./...; if ($LASTEXITCODE -eq 0) { go test ./... } }
+    "test"           { go vet ./...; if ($LASTEXITCODE -eq 0) { go test ./... }; exit $LASTEXITCODE }
+    "db-test" {
+        # Worker integration tests against the dev database. They TRUNCATE the
+        # inbox and app tables (and refuse if the inbox has rows they did not
+        # create). Uses DATABASE_URL if set, otherwise the non-secret dev URL
+        # from .env.example. The URL is never printed.
+        # Before running: stop any worker (it polls and could claim the test
+        # rows), never run during an experiment, and make sure the inbox holds
+        # only evt_dbtest_ rows (or is empty).
+        if (-not $env:DATABASE_URL) {
+            $env:DATABASE_URL = "postgres://relayguard:relayguard@localhost:5433/relayguard?sslmode=disable"
+        }
+        $env:RELAYGUARD_DB_TESTS = "1"
+        go test -count=1 -v ./cmd/worker/
+        exit $LASTEXITCODE
+    }
     "build" {
         go build -o bin\worker.exe ./cmd/worker
         go build -o bin\naive.exe ./cmd/naive
@@ -62,6 +77,7 @@ switch ($Task) {
         Write-Host "  inbox                  inbox rows: status, attempts, errors"
         Write-Host "  reset-data             empty app tables and inbox (keeps schema)"
         Write-Host "  test                   go vet + go test"
+        Write-Host "  db-test                worker DB integration tests (TRUNCATES inbox and app tables)"
         Write-Host "  build                  build worker, naive and chaos into bin\"
     }
 }

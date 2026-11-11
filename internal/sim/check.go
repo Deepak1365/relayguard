@@ -162,3 +162,30 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// DeadEvent is a dead-lettered inbox row, with what the worker recorded.
+type DeadEvent struct {
+	ID        string
+	Attempts  int
+	LastError string
+}
+
+// DeadEvents lists the dead-lettered events, ordered by event id.
+func DeadEvents(ctx context.Context, pool *pgxpool.Pool) ([]DeadEvent, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT event_id, attempts, COALESCE(last_error, '')
+		FROM inbox WHERE status = 'dead' ORDER BY event_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var dead []DeadEvent
+	for rows.Next() {
+		var d DeadEvent
+		if err := rows.Scan(&d.ID, &d.Attempts, &d.LastError); err != nil {
+			return nil, err
+		}
+		dead = append(dead, d)
+	}
+	return dead, rows.Err()
+}

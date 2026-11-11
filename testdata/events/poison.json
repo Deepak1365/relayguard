@@ -1,0 +1,12 @@
+{
+  "id": "evt_fx_poison_1",
+  "object": "event",
+  "type": "test.poison",
+  "created": 1793800030,
+  "data": {
+    "object": {
+      "id": "poison_fx_1",
+      "object": "test"
+    }
+  }
+}
