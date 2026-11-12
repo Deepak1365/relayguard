@@ -5,9 +5,14 @@ Start each experiment with `.\dev.ps1 reset-data`.
 
 | # | Scenario | Correct outcome | Naive | Phase 2 | Phase 3 |
 |---|---|---|---|---|---|
-| 4 | older "active" arrives after "canceled" | status canceled | status active | status active | |
-| 5 | in-order: "active" then "canceled" (regression check) | status canceled | | | |
-| 1-3 | rerun earlier experiments (regression check) | as before | | ✅ | |
+| 4 | older "active" arrives after "canceled" | status canceled | status active | status active | status canceled ✅ (older event marked `stale`; output in section 4) |
+| 5 | in-order: "active" then "canceled" (regression check) | status canceled | not recorded | not recorded | status canceled ✅ (output in section 5) |
+| 1-3 | rerun earlier experiments (regression check) | as before | see [phase 2](phase2-results.md) | ✅ | not recorded (no output was pasted) |
+
+Provenance (added 2026-11-11 during an audit): the Phase 3 cells above were empty until then and were
+filled only from the outputs pasted below. Cells with no pasted output are marked "not recorded".
+The exact commands and the commit each run used were not recorded at the time. This doc was
+first committed in `9c24065`.
 
 ## 4. Stale overwrite
 

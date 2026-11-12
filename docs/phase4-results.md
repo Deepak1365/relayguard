@@ -21,6 +21,14 @@ Full per-seed tables, each with its git commit and exact command:
 - [results/relayguard-crash-only.md](../results/relayguard-crash-only.md)
 - [results/naive-crash-only.md](../results/naive-crash-only.md)
 
+Provenance note (added 2026-11-11 during an audit): these four files say `Commit: 2e1663a`, but the
+runs used code that is not in `2e1663a`: the `-supervise` supervisor, `internal/fault` and naive's
+`before_response` fault point. That code was committed afterwards, in `3bd97b4`, together with
+the results files. At that time the harness did not detect a dirty tree (that check was added in
+`975ef44`). So read the stamps as "2e1663a plus the uncommitted Phase 4b changes later committed as
+3bd97b4". The numbers are unchanged. The RelayGuard crash run was re-measured at `2c708e6` in
+Phase 5 (results/relayguard-crash-lease.md, with `-lease 1s`), with 0 violations again.
+
 The supervised processes' log (not committed) showed crashes at every fault point: worker
 `after_grant` and `before_commit`, naive `after_grant` and `before_response`. It showed no
 worker errors and no dead-lettered events.
@@ -33,6 +41,11 @@ worker errors and no dead-lettered events.
 | Duplicates | `-dup 0.2` | 0 (0/5) | 48 (5/5 seeds failing; per seed: 16, 6, 12, 10, 4) |
 | Reordering | `-reorder 10` | 0 (0/5) | 8 (3/5 seeds failing; per seed: 3, 2, 0, 0, 3) |
 | Both | `-dup 0.2 -reorder 10` | not run separately; see part 2 (0 with crashes added) | 62 (5/5 seeds failing; per seed: 19, 13, 12, 11, 7) |
+
+Provenance note (added 2026-11-11 during an audit): part 1 has no results file and no pasted raw
+output, so these numbers can't be checked against a source. Each total equals the sum of its
+per-seed values. The commit and exact commands were not recorded. Treat this table as a
+summary with the raw output not retained.
 
 "No faults" gave 0 for both targets, as it must: the harness does not invent failures.
 Reordering alone hurt the naive receiver less often than duplicates (two seeds came out correct),

@@ -32,7 +32,8 @@ Never test with the real destructive commands, and never try to read the real .e
 12. If a hook guards .env in shell commands, run `echo .env-hook-canary`. It must be BLOCKED by the hook. Otherwise SKIP and say no hook exists.
 
 ## D. Rule compliance, checked from git and files
-13. `git ls-files .env` prints nothing.
+13. The env file is not tracked: `git ls-files | grep -v /` lists only top-level tracked files; only `.env.example`
+    may appear. (The literal `git ls-files .env` is blocked by the .env hook, which is correct.)
 14. Secret scan of all history, printing ONLY a count, never the matches:
     `git log -p --all | grep -cE "whsec_[A-Za-z0-9]{16,}"` must be 0.
 15. Naive baseline frozen: `git log --oneline -- cmd/naive` and the diffs show only the original code plus fault-injection points.

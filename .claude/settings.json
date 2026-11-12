@@ -3,9 +3,9 @@
     "allow": [
       "Bash(go test:*)",
       "Bash(go vet:*)",
-      "Bash(go build:*)",
+      "Bash(go build ./...)",
       "Bash(go version:*)",
-      "Bash(gofmt -l:*)",
+      "Bash(gofmt -l .)",
       "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File dev.ps1)",
       "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File dev.ps1 state)",
       "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File dev.ps1 inbox)",
@@ -72,6 +72,10 @@
           {
             "type": "command",
             "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-env.ps1\""
+          },
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-allowlist.ps1\""
           }
         ]
       }
