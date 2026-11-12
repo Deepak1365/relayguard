@@ -19,6 +19,14 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 - Replay: re-queue a dead or stale event deliberately (audited).
 - Undo: reverse an applied event only if the affected rows are unchanged since (row versions); otherwise refuse with a conflict explanation.
 - Acceptance: unit/integration tests for preview, replay, undo-success and undo-conflict; chaos regression still 0 violations; results doc.
+- Status: IN PROGRESS. Approved plan: docs/phase6-plan.md (7 steps, one commit each).
+  - [x] Step 1: migration 00004 (change_log, admin_actions, row_version trigger), TRUNCATE sites, internal/dbtest (fe27b99)
+  - [ ] Step 2: change capture in internal/app + worker, subprocess crash test
+  - [ ] Step 3: CheckChangeLog in the harness + negative control
+  - [ ] Step 4: preview (internal/admin, cmd/admin preview/log)
+  - [ ] Step 5: migration 00005, replay fence (attempts, replay_count), replay
+  - [ ] Step 6: undo with conflict explanations
+  - [ ] Step 7: evidence runs from a clean tree, docs/phase6-results.md, decision records
 
 ## Phase 7: dashboard
 - Small web UI (served by a Go admin API on localhost): event timeline per customer, failed/dead/stale events,

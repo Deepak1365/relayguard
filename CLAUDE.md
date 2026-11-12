@@ -33,10 +33,25 @@ a deliberately naive baseline. Honest evidence matters more than features.
 - migrations/: goose, embedded. docs/: per-phase results and decisions. results/: chaos run outputs (committed).
 
 ## Status
-Phases 1-5 complete (baseline, inbox + transactional worker, ordering, chaos harness with crashes,
-claim with lease + poison dead-lettering). Phase 6 (change log, preview, replay, undo) is in progress:
-step 1 of 7 done (migration 00004: change_log, admin_actions, row_version trigger; shared internal/dbtest).
-Next: step 2, change capture in internal/app and the worker. See docs/ROADMAP.md.
+Phases 1-5 complete and pushed (baseline, inbox + transactional worker, ordering, chaos harness with
+crashes, claim with lease + poison dead-lettering). CI green on e674670.
+
+Handoff (2026-11-11):
+- Just finished: Phase 6 step 1 of 7, committed fe27b99 (not pushed). Migration 00004 is applied to the
+  dev DB. Audit fixes committed in e674670 (provenance notes for phases 3-4, tighter allow rules, guard-allowlist hook).
+- In progress: Phase 6 (change log, preview, replay, undo). The approved plan is docs/phase6-plan.md, which
+  includes the reviewer notes for later steps. The user approved steps 1-3 for this round; steps 4-7 need approval again.
+- User decisions (also in the plan): strict row-version undo (refuse if changed since; in practice newest
+  first per customer); row_version via a BEFORE UPDATE trigger; reset-data also wipes admin_actions; undone
+  events are not replayable; previews are not audited; no change_log retention for now. Optional step-7
+  experiments E4 (undo-all property run) and E5 (naive rerun) are UNDECIDED: ask the user at step 7.
+  Keep the Phase 4 worktree C:/dev/relayguard-phase4 and bin/worker-phase4.exe.
+- Uncommitted: nothing. The plan, this handoff and the ROADMAP step list were committed together.
+  Keep the tree clean before any evidence build: untracked files set vcs.modified=true.
+- Next step: Phase 6 step 2, change capture in internal/app and the worker (docs/phase6-plan.md "Step 2").
+  It must log every UPDATE, including no-op ones (the trigger bumps row_version anyway), and needs a 0-credit invoice test.
+- Notes: gh is at "C:\Program Files\GitHub CLI\gh.exe" if it is not on PATH. Background agents survive
+  /clear, so check for running agents and tasklist before builds or experiments.
 
 ## Rules (all agents)
 1. Never run `dev.ps1 reset` or `docker compose down -v` (deletes the database). `dev.ps1 reset-data` is fine.
