@@ -116,5 +116,14 @@ New violation kinds: changelog_missing, changelog_unexpected, changelog_chain_br
 Negative control test (internal/sim): TestDBChangeLogCheckDetectsUnloggedWrite — raw UPDATE produces changelog_chain_break and changelog_final_mismatch.
 Acceptance: control fails as designed; 1-seed smoke reports 0.
 
+As implemented (deviations accepted by the lead/reviewer, 2026-11-12):
+- Two-write negative control: one raw UPDATE cannot produce both kinds. If a logged write follows it, that write's before image no longer chains (changelog_chain_break); if it is the row's last write, the log no longer folds to the stored row (changelog_final_mismatch). TestDBChangeLogCheckDetectsUnloggedWrite therefore does an unlogged customer update followed by a logged invoice, plus an unlogged subscription update at the end, and asserts exactly those two violations.
+- The count check also compares the tables in seq order and requires seq 1..n without gaps (changelog_unexpected).
+- Extra controls: broken image link with row_version intact (a mutation check showed the +1 rule otherwise masks the image comparison), first row_version != 1, cross-scope damage, seq gap.
+- Attribution (reviewer should-fix): new kind changelog_misattributed. Each apply row's content must belong to its event: row_id = image id; customer.created -> payload customer; grant -> payload invoice id and amount_paid/100; invoice customer update -> payload customer, the grant's customer_id, balance change = grant amount; subscription rows -> payload subscription and last_event_id = event id. Control: TestDBChangeLogCheckDetectsSwappedEvents.
+- cmd/chaos flag -changelog-check (default true; relayguard only). Set it to false for workers built before phase 6 (e.g. bin/worker-phase4.exe), which write no change_log. The results meta line records on / off (flag) / n/a (naive).
+- Step 5 follow-up: the count check counts all generations together; with replay it must count the current generation only.
+- jsonb_populate_record ignores extra keys and turns missing keys into NULL: a future migration that adds a column must backfill change_log images or teach the checker the column (comment in internal/sim/changelog_check.go).
+
 ## Later steps (NOT now): 4 preview, 5 migration 00005 + replay fence (attempts, replay_count) + replay, 6 undo, 7 evidence.
 Constraints: cmd/naive unchanged; every behaviour change tested; each step its own commit (lead commits after user approval).

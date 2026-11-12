@@ -63,6 +63,8 @@ func main() {
 	timeout := flag.Duration("timeout", 3*time.Minute, "max wait per seed for the worker to finish (relayguard)")
 	out := flag.String("out", "", "also write a markdown results file, e.g. results/relayguard-crash.md")
 	verbose := flag.Bool("v", false, "print violation examples for every failing seed")
+	changeLogCheck := flag.Bool("changelog-check", true,
+		"check change_log completeness and consistency (relayguard only); set false for workers built before phase 6, e.g. bin/worker-phase4.exe, which write no change_log")
 	flag.Parse()
 
 	if *target != "relayguard" && *target != "naive" {
@@ -129,10 +131,11 @@ func main() {
 
 	fmt.Printf("target=%s seeds=%d-%d customers=%d dup=%.2f reorder=%d poison=%d crash-rate=%.2f kill-interval=%s supervise=%q\n",
 		*target, seeds[0], seeds[len(seeds)-1], *customers, *dup, *reorder, *poison, *crashRate, *killInterval, *supervise)
+	fmt.Println(strings.TrimPrefix(changeLogCheckLine(*target, *changeLogCheck), "- "))
 
 	var results []runResult
 	for _, s := range seeds {
-		r, err := runOne(ctx, pool, sender, *target, s, cfg, opts, *providerRetries, *timeout)
+		r, err := runOne(ctx, pool, sender, *target, s, cfg, opts, *providerRetries, *timeout, *changeLogCheck)
 		if err != nil {
 			log.Print(err)
 			exit(2)
@@ -166,6 +169,7 @@ func main() {
 		}
 		meta := []string{
 			fmt.Sprintf("%s, poison events per seed: %d", leaseLine, *poison),
+			changeLogCheckLine(*target, *changeLogCheck),
 		}
 		if *supervise != "" {
 			meta = append(meta, "- Worker binary: "+binaryBuildInfo(*supervise))
@@ -183,7 +187,7 @@ func main() {
 }
 
 func runOne(ctx context.Context, pool *pgxpool.Pool, sender *sim.Sender, target string, seed int64,
-	cfg sim.Config, opts sim.ChaosOptions, retries int, timeout time.Duration) (runResult, error) {
+	cfg sim.Config, opts sim.ChaosOptions, retries int, timeout time.Duration, changeLogCheck bool) (runResult, error) {
 
 	events := sim.Generate(seed, cfg)
 	exp := sim.Model(events)
@@ -238,6 +242,18 @@ func runOne(ctx context.Context, pool *pgxpool.Pool, sender *sim.Sender, target 
 				extra = append(extra, sim.Violation{Kind: "poison_not_dead", Subject: id, Detail: "poison event was not dead-lettered"})
 			}
 		}
+		// The change log must be a complete, consistent record of this
+		// seed's effects. Only RelayGuard writes one: the naive receiver has
+		// no change_log by design, so it is not checked, and
+		// -changelog-check=false skips it for pre-phase-6 workers (see
+		// changeLogCheckLine).
+		if changeLogCheck {
+			clv, err := sim.CheckChangeLog(ctx, pool, seed)
+			if err != nil {
+				return r, fmt.Errorf("change log check: %w", err)
+			}
+			extra = append(extra, clv...)
+		}
 	} else {
 		counts, err := sim.InboxCounts(ctx, pool)
 		if err != nil {
@@ -255,6 +271,20 @@ func runOne(ctx context.Context, pool *pgxpool.Pool, sender *sim.Sender, target 
 	r.violations = append(v, extra...)
 	r.elapsed = time.Since(start)
 	return r, nil
+}
+
+// changeLogCheckLine says whether the change_log check ran, for the console
+// and the results file, so a file with 0 violations cannot be read as
+// covering a check it never made.
+func changeLogCheckLine(target string, enabled bool) string {
+	switch {
+	case target != "relayguard":
+		return "- Change log check: n/a (the naive receiver writes no change_log)"
+	case !enabled:
+		return "- Change log check: off (flag -changelog-check=false)"
+	default:
+		return "- Change log check: on (changelog_* violation kinds)"
+	}
 }
 
 func printRun(r runResult, examples bool) {
