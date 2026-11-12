@@ -453,6 +453,99 @@ func TestDBChangeLogCheckRounding(t *testing.T) {
 	}
 }
 
+// Generations (step 5a). The count check compares only the rows of the
+// event's current generation (change_log.generation = inbox.replay_count)
+// with what its status implies, and reports rows of any other generation as
+// changelog_unexpected. Synthetic: the invoice's rows and replay_count are
+// edited directly. Moving rows between generations changes nothing the
+// chain, final-state or attribution checks read, so every violation here
+// comes from the count check.
+//
+// Each case asserts the exact set, so the two rules are told apart: "rows in
+// the wrong generation" yields changelog_missing (current generation empty)
+// AND changelog_unexpected (the rows elsewhere). Counting all generations
+// together would lose the first; dropping the other-generation rule would
+// lose the second.
+func TestDBChangeLogCheckCountsCurrentGenerationOnly(t *testing.T) {
+	inv := dbtest.EventPrefix + "a_inv"
+	cases := []struct {
+		name          string
+		rowGeneration int // generation of the invoice's change_log rows
+		replayCount   int // inbox.replay_count of the invoice
+		want          []string
+		wantDetail    string // substring of the changelog_unexpected detail
+	}{
+		{"rows in the current generation 1", 1, 1, nil, ""},
+		{"rows left in generation 0 after replay", 0, 1,
+			[]string{KindChangeLogMissing + " " + inv, KindChangeLogUnexpected + " " + inv}, "generation(s) [0], but the event is at generation 1"},
+		{"rows in a generation above replay_count", 2, 1,
+			[]string{KindChangeLogMissing + " " + inv, KindChangeLogUnexpected + " " + inv}, "generation(s) [2], but the event is at generation 1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pool := dbtest.Pool(t)
+			f := history(t, pool, "a")
+			mustExec(t, pool, `UPDATE change_log SET generation = $2 WHERE inbox_id = $1`, f.invoice, c.rowGeneration)
+			mustExec(t, pool, `UPDATE inbox SET replay_count = $2 WHERE id = $1`, f.invoice, c.replayCount)
+			v := check(t, pool, "a")
+			wantViolations(t, v, c.want...)
+			for _, x := range v {
+				if x.Kind == KindChangeLogUnexpected && !strings.Contains(x.Detail, c.wantDetail) {
+					t.Fatalf("detail %q, want %q", x.Detail, c.wantDetail)
+				}
+			}
+		})
+	}
+}
+
+// The realistic path: an invoice that arrived before its customer is dead
+// (no rows), and a stale subscription event (no rows); both are replayed
+// (raw SQL until admin.Replay exists in step 5b) and applied again. The
+// invoice now applies under generation 1, the stale event is stale again.
+// The whole history must check clean, and the invoice's rows must really be
+// in generation 1 (otherwise "clean" could just mean "not looked at").
+func TestDBChangeLogCheckReplayedEventClean(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	f := history(t, pool, "a")
+
+	// Dead: an invoice for a customer that did not exist when it was tried.
+	early := dbtest.InsertEvent(t, pool, "a_inv_early", "invoice.paid", dbtest.InvoiceObject("in_dbtest_a_early", "cus_dbtest_a_2", 3000))
+	mustExec(t, pool, `UPDATE inbox SET status = 'dead', attempts = 8, last_error = 'unknown customer cus_dbtest_a_2', processed_at = now() WHERE id = $1`, early)
+	cus2 := dbtest.InsertEvent(t, pool, "a_cus2", "customer.created", dbtest.CustomerObject("cus_dbtest_a_2"))
+	if got := dbtest.ApplyInbox(t, pool, cus2); got != "done" {
+		t.Fatalf("second customer: %s", got)
+	}
+	wantViolations(t, check(t, pool, "a")) // dead with no rows is clean
+
+	replay := `UPDATE inbox SET status = 'pending', attempts = 0, last_error = NULL, processed_at = NULL,
+		next_attempt_at = now(), replay_count = replay_count + 1 WHERE id = $1`
+	mustExec(t, pool, replay, early)
+	mustExec(t, pool, replay, f.stale)
+	if got := dbtest.ApplyInbox(t, pool, early); got != "done" {
+		t.Fatalf("replayed invoice: %s, want done", got)
+	}
+	if got := dbtest.ApplyInbox(t, pool, f.stale); got != "stale" {
+		t.Fatalf("replayed stale event: %s, want stale again", got)
+	}
+
+	wantViolations(t, check(t, pool, "a"))
+	rows := dbtest.ChangeLog(t, pool, early)
+	if len(rows) != 2 || rows[0].Generation != 1 || rows[1].Generation != 1 {
+		t.Fatalf("replayed invoice change_log: %+v, want 2 rows in generation 1", rows)
+	}
+	if n := len(dbtest.ChangeLog(t, pool, f.stale)); n != 0 {
+		t.Fatalf("replayed stale event: %d change_log rows, want 0", n)
+	}
+	var replays int
+	if err := pool.QueryRow(ctx, `SELECT replay_count FROM inbox WHERE id = $1`, f.stale).Scan(&replays); err != nil {
+		t.Fatal(err)
+	}
+	if replays != 1 {
+		t.Fatalf("stale event replay_count %d, want 1", replays)
+	}
+}
+
 // Previews write change_log rows and roll them back, which burns sequence
 // ids. The checker must not care: previewing every event of a history right
 // before applying it must still give 0 violations. The id gap proves the

@@ -175,6 +175,60 @@ As implemented (reviewer should-fixes, 2026-11-12):
   TestDBDeadLetterFencedByGeneration; sim TestDBChangeLogCheckCountsCurrentGenerationOnly (synthetic); TestDBChangeLogCheckReplayedEventClean.
 - Regression adds a poison smoke: chaos seeds 1-2 -poison 2 (with crash/dup/reorder/lease 1s).
 
+As implemented (5a, 2026-11-12; reviewed and approved, reviewer follow-ups applied):
+- 00005 constraint names: inbox_replay_count_nonneg, change_log_generation_nonneg, change_log_seq_positive. Down drops the two
+  change_log CHECKs and the column (which drops its CHECK). Applied to the dev DB.
+- Worker: claimToken{attempts, generation}; claim, process and deadLetterCrashed take/return it. Fence and dead-letter WHERE include
+  replay_count. The new tests live in cmd/worker/fence_db_test.go; replays there are raw SQL (replayRaw) plus markDead for the outcome
+  another worker reached meanwhile.
+- Checker: the other-generation rule is separate from the current-generation comparison, so rows filed under the wrong generation give
+  BOTH changelog_missing (current generation empty) and changelog_unexpected (rows elsewhere), one each per event. Generations above
+  replay_count count as "other" too (<>, not <; mutation-tested). Naive runs are unaffected: cmd/chaos only calls CheckChangeLog for
+  -target relayguard.
+- Small deviations: dbtest.ApplyInbox also switched its inbox lock from FOR UPDATE to FOR NO KEY UPDATE to match the worker;
+  TestDBHeldFenceLockBlocksReclaim's simulated fence likewise. TestDBPreviewWaitsForFenceWithoutDeadlock keeps FOR UPDATE on purpose
+  (it is the conflicting case the inbox-first lock guards against); its comment and Preview's now say so.
+- Extras: TestDBKeyShareDoesNotBlockClaimOrFence has two subtests (explicit FOR KEY SHARE, and an admin_actions FK insert, the real
+  source); TestDBPreviewUsesReplayCount (generation = replay_count; a committed row in an older generation does not conflict, one in
+  the current generation gives ErrChanged); unit test TestOtherGenerationRows. The main_db_test.go header note "fence lock not
+  directly tested" is replaced: TestDBFenceLockBlocksReclaimMidApply tests it from inside a real apply (AfterGrant hook).
+- Mutations run (each applied, test failed, reverted): claim FOR UPDATE SKIP LOCKED and fence FOR UPDATE -> KeyShare test; fence without
+  lock -> FenceLockBlocksReclaimMidApply (-count=3); fence without replay_count, worker generation 0 -> ReplayFencesOldClaim;
+  dead-letter without replay_count -> DeadLetterFencedByGeneration; checker all-generation count (2 variants), no other-generation
+  rule, < instead of <> -> CountsCurrentGenerationOnly; ApplyInbox generation 0 -> ReplayedEventClean; Preview generation 0 ->
+  PreviewUsesReplayCount.
+- Preview vs worker after 5a: the preview no longer queues behind the worker. Its FOR KEY SHARE on the inbox row does not conflict
+  with the fence's FOR NO KEY UPDATE, so it overlaps an apply in progress. That overlap is bounded by lock_timeout (it gives up with
+  ErrBusy on the first key the worker holds uncommitted: the customer unique key for customer.created, the worker's
+  change_log_apply_once key for invoice.paid) and by the ErrChanged checks (change_log_apply_once collision; re-read of status
+  and replay_count, both at the end and after a failed apply, see below).
+  Test TestDBPreviewOverlapsRealFence (worker tx = real fence lock + real app.Apply; subtests "worker inserted the customer" and
+  "worker logged the grant") proves: the preview no longer blocks on the inbox lock, gives up with ErrBusy on the worker's
+  uncommitted keys within lock_timeout, writes nothing, and the worker then commits the event done with exactly its change_log
+  rows. Stable over -count=20. Mutation without lock_timeout -> 57014 statement timeout instead of ErrBusy, fails it. It does NOT
+  prove freedom from deadlock (200ms lock_timeout < deadlock_timeout 1s, and the worker never waits on the preview); that rests on
+  reasoning: the preview runs the same app.Apply, so it takes locks in the same order, and its one extra lock (inbox KEY SHARE,
+  taken first) conflicts with neither the fence nor the apply. TestDBPreviewWaitsForFenceWithoutDeadlock is kept for a FOR UPDATE
+  holder.
+- Reviewer follow-up: the final re-read compares status AND replay_count (a replay that re-fails during the preview is dead -> dead
+  in a newer generation, which status and change_log_apply_once both miss). Test TestDBPreviewDetectsReplayDuringPreview uses an
+  unexported test hook Options.beforeReread to commit that change just before the re-read; mutation "status only" fails it.
+- Reviewer round 2: a failed apply outside the business allow-list now also re-reads. This is the NORMAL customer.created race
+  since 5a: the preview overlaps the worker, waits (well inside the 2s lock_timeout) on the worker's uncommitted customer insert,
+  and gets 23505 when the worker commits (before 5a it queued behind the fence and got ErrNotPreviewable). The error branch rolls
+  back the aborted savepoint, re-reads status and replay_count (shared helper stateMoved), and returns ErrChanged wrapping the
+  original error if either moved; otherwise it classifies as before. If the rollback or the re-read fails, the original error is
+  returned, never the re-read's. Exit code is unchanged (1, like every refusal); the message now says the event changed.
+  Test TestDBPreviewWorkerCommitsDuringPreview (preview with 2s lock_timeout in a goroutine; once pg_blocking_pids shows it waiting
+  on the worker, the worker marks done and commits; ErrChanged that still wraps the 23505; stable over -count=20). Mutations: no
+  re-read in the error branch -> raw 23505, fails it; re-read without the savepoint rollback -> the re-read fails on the aborted
+  transaction, the original 23505 is returned, fails it. TestDBPreviewUnlistedFailureIsAnError (no state change) still exits 1
+  with a plain error.
+- Regression (experiment-runner, 2026-11-12, uncommitted tree = not evidence, outputs in scratchpad only) on the final 5a build:
+  crash smoke seeds 1-3 (-dup 0.2 -reorder 10 -crash-rate 0.1 -kill-interval 2s -lease 1s, changelog check on): 0 violations;
+  poison smoke seeds 1-2 (same flags + -poison 2): 0 violations, dead=2 per seed. An earlier identical run (before the preview-only
+  round-2 fix) also gave 0 violations, dead=2.
+
 ### Step 5b: replay (audited)
 - admin.Replay(ctx, pool, ReplayRequest{InboxID, Actor, Reason}, Options) (ReplayResult, error). Only dead and stale; refuse done, pending,
   skipped, and any event with an admin_actions undo/done row (guard; undo arrives in step 6).

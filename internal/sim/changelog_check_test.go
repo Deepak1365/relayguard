@@ -100,6 +100,17 @@ func TestCompareApplyRowsSeq(t *testing.T) {
 	}
 }
 
+func TestOtherGenerationRows(t *testing.T) {
+	if got := otherGenerationRows("evt", 1, nil); got != nil {
+		t.Fatalf("no other generations: %+v, want no violation", *got)
+	}
+	got := otherGenerationRows("evt", 1, []int32{0, 2})
+	if got == nil || got.Kind != KindChangeLogUnexpected || got.Subject != "evt" ||
+		!strings.Contains(got.Detail, "[0 2]") || !strings.Contains(got.Detail, "generation 1") {
+		t.Fatalf("other generations [0 2] at generation 1: %+v, want changelog_unexpected naming both", got)
+	}
+}
+
 func rv(n int64) *int64 { return &n }
 
 func TestCheckChain(t *testing.T) {

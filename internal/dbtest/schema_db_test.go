@@ -1,16 +1,68 @@
 package dbtest
 
-// Schema tests for migration 00004. Skipped unless DB tests are enabled (see
-// the package comment); run them through `dev.ps1 db-test`.
+// Schema tests for migrations 00004 and 00005. Skipped unless DB tests are
+// enabled (see the package comment); run them through `dev.ps1 db-test`.
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/Deepak1365/relayguard/internal/db"
 )
+
+// Migration 00005: a new inbox row starts at replay_count 0 (generation 0,
+// which is what every change_log row written before 00005 carries), and the
+// CHECKs reject numbering no code path should ever produce. Each rejected
+// write must fail on its own named constraint, not some other error.
+func TestDBSchemaReplay(t *testing.T) {
+	pool := Pool(t)
+	ctx := context.Background()
+	inboxID := InsertEvent(t, pool, "schema_replay", "customer.created", CustomerObject("cus_dbtest_schema"))
+
+	var replayCount int
+	if err := pool.QueryRow(ctx, `SELECT replay_count FROM inbox WHERE id = $1`, inboxID).Scan(&replayCount); err != nil {
+		t.Fatalf("read replay_count: %v", err)
+	}
+	if replayCount != 0 {
+		t.Fatalf("new inbox row: replay_count %d, want 0 (column default)", replayCount)
+	}
+
+	insertChange := func(generation, seq int) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO change_log (inbox_id, generation, source, seq, table_name, row_id, op, after_image)
+			VALUES ($1, $2, 'apply', $3, 'customers', 1, 'insert', '{"id": 1}')`, inboxID, generation, seq)
+		return err
+	}
+	wantCheck := func(what string, err error, constraint string) {
+		t.Helper()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != constraint {
+			t.Fatalf("%s: err=%v, want a check violation (23514) on %s", what, err, constraint)
+		}
+	}
+
+	_, err := pool.Exec(ctx, `UPDATE inbox SET replay_count = -1 WHERE id = $1`, inboxID)
+	wantCheck("replay_count -1", err, "inbox_replay_count_nonneg")
+	wantCheck("generation -1", insertChange(-1, 1), "change_log_generation_nonneg")
+	wantCheck("seq 0", insertChange(0, 0), "change_log_seq_positive")
+
+	// Controls: the boundary values are accepted, so the rejections above
+	// come from the bounds, not from something else in the statements.
+	if _, err := pool.Exec(ctx, `UPDATE inbox SET replay_count = 1 WHERE id = $1`, inboxID); err != nil {
+		t.Fatalf("replay_count 1: %v", err)
+	}
+	if err := insertChange(0, 1); err != nil {
+		t.Fatalf("generation 0, seq 1: %v", err)
+	}
+	if n := Count(t, pool, "change_log"); n != 1 {
+		t.Fatalf("change_log rows: %d, want 1 (only the valid insert)", n)
+	}
+}
 
 // The undo path (phase 6, step 6) refuses when a row's row_version moved
 // since the change it wants to revert. That only works if EVERY update bumps

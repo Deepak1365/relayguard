@@ -26,8 +26,9 @@ func SubscriptionObject(id, customer, status string) map[string]any {
 
 // ApplyInbox processes one inbox row the way cmd/worker does, minus claim
 // and fence (these tests run single-threaded): app.Apply with a fresh
-// recorder (generation 0) inside a savepoint, then mark the row done, stale
-// or skipped, and return that status. Any other apply error fails the test.
+// recorder (generation = inbox.replay_count) inside a savepoint, then mark
+// the row done, stale or skipped, and return that status. Any other apply
+// error fails the test.
 // Kept minimal on purpose; the worker's own DB tests cover claim, lease and
 // retry, and use the real worker instead of this.
 func ApplyInbox(t *testing.T, pool *pgxpool.Pool, inboxID int64) string {
@@ -38,8 +39,12 @@ func ApplyInbox(t *testing.T, pool *pgxpool.Pool, inboxID int64) string {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
+	// Same lock and generation as the worker's fence: a replayed event's
+	// changes go under its current replay_count.
 	var payload string
-	if err := tx.QueryRow(ctx, `SELECT payload::text FROM inbox WHERE id = $1 FOR UPDATE`, inboxID).Scan(&payload); err != nil {
+	var generation int
+	if err := tx.QueryRow(ctx, `SELECT payload::text, replay_count FROM inbox WHERE id = $1 FOR NO KEY UPDATE`, inboxID).
+		Scan(&payload, &generation); err != nil {
 		t.Fatalf("read inbox %d: %v", inboxID, err)
 	}
 	var evt stripeevent.Event
@@ -51,7 +56,7 @@ func ApplyInbox(t *testing.T, pool *pgxpool.Pool, inboxID int64) string {
 		t.Fatal(err)
 	}
 	status := "done"
-	switch err := app.Apply(ctx, sp, changelog.NewApply(inboxID, 0), evt, app.Hooks{}); {
+	switch err := app.Apply(ctx, sp, changelog.NewApply(inboxID, generation), evt, app.Hooks{}); {
 	case err == nil:
 		if err := sp.Commit(ctx); err != nil {
 			t.Fatal(err)

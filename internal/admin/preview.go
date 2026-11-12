@@ -38,6 +38,12 @@ var (
 type Options struct {
 	LockTimeout      time.Duration // default 2s
 	StatementTimeout time.Duration // default 5s
+
+	// beforeReread, if set, runs just before the final inbox re-read. Test
+	// hook only (unexported, so only this package's tests can set it): it
+	// lets a test commit a concurrent change at the one point the re-read
+	// exists to catch.
+	beforeReread func()
 }
 
 func (o Options) withDefaults() Options {
@@ -101,21 +107,24 @@ func Preview(ctx context.Context, pool *pgxpool.Pool, inboxID int64, opts Option
 	}
 
 	// Lock the inbox row FIRST, with FOR KEY SHARE (the same lock the
-	// change_log foreign key takes later anyway). Why first: until step 5a
-	// the worker's fence holds FOR UPDATE on this row while it applies. If the
-	// preview took its app-row locks first (an uncommitted customer insert,
-	// a subscription pre-read) and only then needed the inbox row for the
-	// change_log FK, it could wait on the worker while the worker waits on
-	// it: a deadlock, and Postgres might abort the WORKER. Taking the inbox
-	// lock before any other means the preview waits (bounded by lock_timeout,
-	// then ErrBusy) while holding nothing, so no cycle can form
-	// (TestDBPreviewWaitsForFenceWithoutDeadlock). KEY SHARE does not block
-	// the worker's status UPDATE, which is why the status is re-read below.
+	// change_log foreign key takes later anyway). Why first: any transaction
+	// holding FOR UPDATE on this row (the worker's fence before step 5a) would
+	// otherwise be a deadlock risk. If the preview took its app-row locks
+	// first (an uncommitted customer insert, a subscription pre-read) and only
+	// then needed the inbox row for the change_log FK, it could wait on that
+	// transaction while it waits on the preview, and Postgres might abort the
+	// WORKER. Taking the inbox lock before any other means the preview waits
+	// (bounded by lock_timeout, then ErrBusy) while holding nothing, so no
+	// cycle can form (TestDBPreviewWaitsForFenceWithoutDeadlock). Since 5a
+	// the fence is FOR NO KEY UPDATE, which KEY SHARE does not conflict with,
+	// so the preview no longer waits for the worker here at all; the ordering
+	// stays as a guard. KEY SHARE does not block the worker's status UPDATE
+	// either, which is why the status is re-read below.
 	var payload string
 	err = tx.QueryRow(ctx, `
-		SELECT event_id, event_type, status, attempts, payload::text FROM inbox WHERE id = $1
+		SELECT event_id, event_type, status, attempts, replay_count, payload::text FROM inbox WHERE id = $1
 		FOR KEY SHARE`, inboxID).
-		Scan(&res.EventID, &res.EventType, &res.Status, &res.Attempts, &payload)
+		Scan(&res.EventID, &res.EventType, &res.Status, &res.Attempts, &res.Generation, &payload)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return res, fmt.Errorf("%w: id %d", ErrNotFound, inboxID)
 	}
@@ -132,8 +141,10 @@ func Preview(ctx context.Context, pool *pgxpool.Pool, inboxID int64, opts Option
 		return res, nil
 	}
 
-	// generation 0 until replay exists (step 5a switches to replay_count).
-	res.Generation = 0
+	// res.Generation is the event's current replay_count: the generation the
+	// worker would log this apply under. Recording under the same generation
+	// also makes a concurrent real apply collide with the preview on
+	// change_log_apply_once (ErrChanged) instead of passing unnoticed.
 	// Savepoint: a failing statement aborts only the savepoint, so the outer
 	// transaction can still re-read the inbox status below. (Same structure
 	// as the worker's process.)
@@ -160,7 +171,23 @@ func Preview(ctx context.Context, pool *pgxpool.Pool, inboxID int64, opts Option
 		res.Outcome, res.Reason = OutcomeError, applyErr.Error()
 	default:
 		// Anything else (locks, timeouts, database errors, a concurrent apply)
-		// says nothing reliable about the event: the preview failed.
+		// says nothing reliable about the event: the preview failed. But first
+		// check whether a worker finished the event meanwhile, which since 5a
+		// is the usual cause: the preview no longer queues behind the fence, so
+		// it overlaps the apply, waits (well within lock_timeout) on a key the
+		// worker inserted, and gets a unique violation (23505) once the worker
+		// commits. That is "the event changed", not a failure
+		// (TestDBPreviewWorkerCommitsDuringPreview).
+		//
+		// The failed statement aborted the savepoint; rolling it back makes
+		// the transaction usable for the re-read. If either step fails (e.g.
+		// the context was cancelled), report the original error unchanged,
+		// never the re-read's.
+		if err := sp.Rollback(ctx); err == nil {
+			if moved, err := stateMoved(ctx, tx, inboxID, res); err == nil && moved != "" {
+				return res, fmt.Errorf("apply: %w (%s): %w", ErrChanged, moved, applyErr)
+			}
+		}
 		return res, classify("apply", applyErr)
 	}
 	// After a failed apply the savepoint may be aborted; roll it back so the
@@ -176,15 +203,38 @@ func Preview(ctx context.Context, pool *pgxpool.Pool, inboxID int64, opts Option
 	}
 
 	// If a worker processed the event meanwhile, the preview describes a
-	// state that no longer exists.
-	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM inbox WHERE id = $1`, inboxID).Scan(&status); err != nil {
+	// state that no longer exists. Status alone is not enough: a replay that
+	// fails again during the preview goes dead -> pending -> dead, the same
+	// status in a newer generation (ABA). change_log_apply_once does not
+	// catch that either, because the generations differ. replay_count only
+	// grows, so comparing it closes the gap (TestDBPreviewDetectsReplayDuringPreview).
+	if opts.beforeReread != nil {
+		opts.beforeReread()
+	}
+	moved, err := stateMoved(ctx, tx, inboxID, res)
+	if err != nil {
 		return res, classify("re-read inbox", err)
 	}
-	if status != res.Status {
-		return res, fmt.Errorf("%w: status %s -> %s", ErrChanged, res.Status, status)
+	if moved != "" {
+		return res, fmt.Errorf("%w: %s", ErrChanged, moved)
 	}
 	return res, nil
+}
+
+// stateMoved re-reads the inbox row (READ COMMITTED: it sees commits made
+// since the preview started) and describes how its status or replay_count
+// differ from what the preview started from, or returns "" if neither did.
+func stateMoved(ctx context.Context, tx pgx.Tx, inboxID int64, res PreviewResult) (string, error) {
+	var status string
+	var generation int
+	if err := tx.QueryRow(ctx, `SELECT status, replay_count FROM inbox WHERE id = $1`, inboxID).
+		Scan(&status, &generation); err != nil {
+		return "", err
+	}
+	if status == res.Status && generation == res.Generation {
+		return "", nil
+	}
+	return fmt.Sprintf("status %s -> %s, generation %d -> %d", res.Status, status, res.Generation, generation), nil
 }
 
 // readChanges reads this apply's change_log rows back, inside the still-open

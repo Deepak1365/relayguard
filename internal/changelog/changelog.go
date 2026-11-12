@@ -73,7 +73,8 @@ type Recorder struct {
 }
 
 // NewApply returns a Recorder for source='apply' rows. generation is the
-// event's replay generation (always 0 until replay exists, phase 6 step 5).
+// event's replay generation: inbox.replay_count as confirmed by the caller's
+// fence (0 for an event that was never replayed).
 func NewApply(inboxID int64, generation int) *Recorder {
 	return &Recorder{inboxID: inboxID, generation: generation}
 }

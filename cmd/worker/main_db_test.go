@@ -4,12 +4,10 @@ package main
 // safety rules before running them are documented in internal/dbtest, which
 // holds the shared helpers.
 //
-// Not directly tested: the fence's own row lock (SELECT ... FOR UPDATE in
-// process). TestDBHeldFenceLockBlocksReclaim takes an equivalent lock from
-// the test itself, so it proves claim skips a locked row, but not that
-// process actually takes that lock. That lock is what stops a second worker
-// from re-claiming and applying the same event while the first is mid-apply
-// after its lease expired; dropping FOR UPDATE would pass these tests.
+// The fence's own row lock (SELECT ... FOR NO KEY UPDATE in process) is
+// tested from inside a real apply in fence_db_test.go
+// (TestDBFenceLockBlocksReclaimMidApply); TestDBHeldFenceLockBlocksReclaim
+// below only proves that claim skips a row someone else has locked.
 
 import (
 	"context"
@@ -34,12 +32,12 @@ func TestDBClaimHoldsLease(t *testing.T) {
 	rowID := dbtest.InsertEvent(t, pool, "lease_1", "customer.created", dbtest.CustomerObject("cus_dbtest_1"))
 	w := newTestWorker(pool)
 
-	id, attempts, ok, err := w.claim(ctx)
+	id, tok, ok, err := w.claim(ctx)
 	if err != nil || !ok {
 		t.Fatalf("first claim: ok=%v err=%v", ok, err)
 	}
-	if id != rowID || attempts != 1 {
-		t.Fatalf("first claim: id=%d attempts=%d, want id=%d attempts=1", id, attempts, rowID)
+	if id != rowID || tok != (claimToken{attempts: 1, generation: 0}) {
+		t.Fatalf("first claim: id=%d token=%+v, want id=%d attempts=1 generation=0", id, tok, rowID)
 	}
 
 	if _, _, ok, err := w.claim(ctx); err != nil || ok {
@@ -56,18 +54,18 @@ func TestDBLeaseExpiryAndFencing(t *testing.T) {
 	rowID := dbtest.InsertEvent(t, pool, "fence_1", "customer.created", dbtest.CustomerObject("cus_dbtest_2"))
 	a, b := newTestWorker(pool), newTestWorker(pool)
 
-	_, attA, ok, err := a.claim(ctx)
-	if err != nil || !ok || attA != 1 {
-		t.Fatalf("claim A: attempts=%d ok=%v err=%v", attA, ok, err)
+	_, tokA, ok, err := a.claim(ctx)
+	if err != nil || !ok || tokA.attempts != 1 {
+		t.Fatalf("claim A: token=%+v ok=%v err=%v", tokA, ok, err)
 	}
 	dbtest.ExpireLease(t, pool, rowID) // A stalls past its lease
-	idB, attB, ok, err := b.claim(ctx)
-	if err != nil || !ok || idB != rowID || attB != 2 {
-		t.Fatalf("claim B: id=%d attempts=%d ok=%v err=%v, want id=%d attempts=2", idB, attB, ok, err, rowID)
+	idB, tokB, ok, err := b.claim(ctx)
+	if err != nil || !ok || idB != rowID || tokB.attempts != 2 {
+		t.Fatalf("claim B: id=%d token=%+v ok=%v err=%v, want id=%d attempts=2", idB, tokB, ok, err, rowID)
 	}
 
 	// A wakes up and tries to process with its old claim: the fence rejects it.
-	if err := a.process(ctx, rowID, attA); err != nil {
+	if err := a.process(ctx, rowID, tokA); err != nil {
 		t.Fatalf("process A: %v", err)
 	}
 	if r := dbtest.ReadRow(t, pool, rowID); r.Status != "pending" || r.Attempts != 2 {
@@ -81,7 +79,7 @@ func TestDBLeaseExpiryAndFencing(t *testing.T) {
 		t.Fatalf("stale worker A wrote %d change_log rows, want 0", n)
 	}
 
-	if err := b.process(ctx, rowID, attB); err != nil {
+	if err := b.process(ctx, rowID, tokB); err != nil {
 		t.Fatalf("process B: %v", err)
 	}
 	if r := dbtest.ReadRow(t, pool, rowID); r.Status != "done" || r.Attempts != 2 {
@@ -96,8 +94,9 @@ func TestDBLeaseExpiryAndFencing(t *testing.T) {
 }
 
 // While a worker is inside process, it holds the row lock (SELECT ... FOR
-// UPDATE in the fencing check). Even if its lease has expired by then, claim's
-// FOR UPDATE SKIP LOCKED must skip the row instead of re-claiming it.
+// NO KEY UPDATE in the fencing check). Even if its lease has expired by then,
+// claim's FOR NO KEY UPDATE SKIP LOCKED must skip the row instead of
+// re-claiming it.
 //
 // Ordering: claim, then expire the lease with a plain UPDATE, and only then
 // take the lock in a separate transaction. Doing the UPDATE after taking the
@@ -108,8 +107,8 @@ func TestDBHeldFenceLockBlocksReclaim(t *testing.T) {
 	rowID := dbtest.InsertEvent(t, pool, "lock_1", "customer.created", dbtest.CustomerObject("cus_dbtest_5"))
 	w := newTestWorker(pool)
 
-	if _, att, ok, err := w.claim(ctx); err != nil || !ok || att != 1 {
-		t.Fatalf("claim: attempts=%d ok=%v err=%v", att, ok, err)
+	if _, tok, ok, err := w.claim(ctx); err != nil || !ok || tok.attempts != 1 {
+		t.Fatalf("claim: token=%+v ok=%v err=%v", tok, ok, err)
 	}
 	dbtest.ExpireLease(t, pool, rowID)
 
@@ -118,7 +117,7 @@ func TestDBHeldFenceLockBlocksReclaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM inbox WHERE id = $1 FOR UPDATE`, rowID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM inbox WHERE id = $1 FOR NO KEY UPDATE`, rowID); err != nil {
 		t.Fatalf("take fence lock: %v", err)
 	}
 
@@ -135,9 +134,9 @@ func TestDBHeldFenceLockBlocksReclaim(t *testing.T) {
 
 	// Control: with the lock released, the expired row is claimable, so the
 	// empty claim above was caused by the lock, not by the lease.
-	id, att, ok, err := w.claim(ctx)
-	if err != nil || !ok || id != rowID || att != 2 {
-		t.Fatalf("claim after unlock: id=%d attempts=%d ok=%v err=%v, want id=%d attempts=2", id, att, ok, err, rowID)
+	id, tok, ok, err := w.claim(ctx)
+	if err != nil || !ok || id != rowID || tok.attempts != 2 {
+		t.Fatalf("claim after unlock: id=%d token=%+v ok=%v err=%v, want id=%d attempts=2", id, tok, ok, err, rowID)
 	}
 }
 
@@ -172,17 +171,17 @@ func TestDBDeadLetterRespectsReclaim(t *testing.T) {
 	// A claims (attempts 9) and stalls before dead-lettering; its lease
 	// expires and B re-claims (attempts 10).
 	a, b := newTestWorker(pool), newTestWorker(pool)
-	_, attA, ok, err := a.claim(ctx)
-	if err != nil || !ok || attA != maxAttempts+1 {
-		t.Fatalf("claim A: attempts=%d ok=%v err=%v", attA, ok, err)
+	_, tokA, ok, err := a.claim(ctx)
+	if err != nil || !ok || tokA.attempts != maxAttempts+1 {
+		t.Fatalf("claim A: token=%+v ok=%v err=%v", tokA, ok, err)
 	}
 	dbtest.ExpireLease(t, pool, rowID)
-	_, attB, ok, err := b.claim(ctx)
-	if err != nil || !ok || attB != maxAttempts+2 {
-		t.Fatalf("claim B: attempts=%d ok=%v err=%v", attB, ok, err)
+	_, tokB, ok, err := b.claim(ctx)
+	if err != nil || !ok || tokB.attempts != maxAttempts+2 {
+		t.Fatalf("claim B: token=%+v ok=%v err=%v", tokB, ok, err)
 	}
 
-	updated, err := a.deadLetterCrashed(ctx, rowID, attA)
+	updated, err := a.deadLetterCrashed(ctx, rowID, tokA)
 	if err != nil {
 		t.Fatalf("dead-letter A: %v", err)
 	}
@@ -196,7 +195,7 @@ func TestDBDeadLetterRespectsReclaim(t *testing.T) {
 	// B, the current claim holder, dead-letters it. It records maxAttempts,
 	// not claimedAttempts-1 (which would be 9): A's lost claim never ran
 	// the event.
-	updated, err = b.deadLetterCrashed(ctx, rowID, attB)
+	updated, err = b.deadLetterCrashed(ctx, rowID, tokB)
 	if err != nil || !updated {
 		t.Fatalf("dead-letter B: updated=%v err=%v", updated, err)
 	}

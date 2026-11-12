@@ -5,15 +5,20 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Deepak1365/relayguard/internal/app"
 	"github.com/Deepak1365/relayguard/internal/changelog"
 	"github.com/Deepak1365/relayguard/internal/dbtest"
+	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
 const testCustomer = "cus_dbtest_adm"
@@ -206,8 +211,11 @@ func TestDBLog(t *testing.T) {
 	}
 }
 
-// Until step 5a the worker's fence holds FOR UPDATE on the inbox row while
-// it applies. Here a transaction plays that worker: it holds the fence on a
+// Before step 5a the worker's fence held FOR UPDATE on the inbox row while
+// it applied (since 5a it is FOR NO KEY UPDATE, which the preview's KEY SHARE
+// does not wait for; the test keeps FOR UPDATE because it is the
+// conflicting case the inbox-first lock guards against, for any FOR UPDATE
+// holder). Here a transaction plays that worker: it holds the fence on a
 // pending customer.created, the preview starts and must wait for it holding
 // nothing, and the "worker" then inserts the same customer. Without the
 // preview's inbox-first lock, the preview would already hold an
@@ -281,6 +289,272 @@ func TestDBPreviewWaitsForFenceWithoutDeadlock(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("preview did not finish after the fence was released")
+	}
+}
+
+// Step 5a: the preview applies under the event's current replay_count, the
+// generation the worker would use. Its changes are read back from that
+// generation, and an apply row already committed in that generation (a
+// worker applied the replayed event meanwhile) is detected as ErrChanged,
+// while one from an older generation is not this apply's business.
+func TestDBPreviewUsesReplayCount(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	appliedCustomer(t, pool)
+	inv := dbtest.InsertEvent(t, pool, "adm_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_adm", testCustomer, 2000))
+	if _, err := pool.Exec(ctx, `UPDATE inbox SET status = 'dead', replay_count = 2 WHERE id = $1`, inv); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Preview(ctx, pool, inv, Options{})
+	if err != nil || res.Outcome != OutcomeApply || res.Generation != 2 || len(res.Changes) != 2 {
+		t.Fatalf("preview at replay_count 2: %+v, %v; want apply in generation 2 with 2 changes", res, err)
+	}
+
+	committed := func(generation int) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO change_log (inbox_id, generation, source, seq, table_name, row_id, op, after_image)
+			VALUES ($1, $2, 'apply', 1, 'customers', 1, 'insert', '{"id": 1}')`, inv, generation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	committed(1) // an older generation: no conflict
+	if res, err := Preview(ctx, pool, inv, Options{}); err != nil || res.Outcome != OutcomeApply {
+		t.Fatalf("preview with an older generation's row: %+v, %v; want apply", res, err)
+	}
+	committed(2) // the current generation: a concurrent apply
+	if res, err := Preview(ctx, pool, inv, Options{}); !errors.Is(err, ErrChanged) {
+		t.Fatalf("preview with a committed row in the current generation: %+v, %v; want ErrChanged", res, err)
+	}
+}
+
+// Reviewer follow-up (5a): the final re-read must compare replay_count too.
+// A replay that fails again while the preview runs leaves the status as it
+// was (dead -> pending -> dead) in a newer generation; the preview's own
+// change_log rows are in the old generation, so change_log_apply_once does
+// not collide either. The hook commits exactly that net change from another
+// session just before the re-read. Its UPDATE does not wait: it touches no
+// key column, so the preview's KEY SHARE on the row does not block it.
+func TestDBPreviewDetectsReplayDuringPreview(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	appliedCustomer(t, pool)
+	inv := dbtest.InsertEvent(t, pool, "adm_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_adm", testCustomer, 2000))
+	if _, err := pool.Exec(ctx, `UPDATE inbox SET status = 'dead', attempts = 8, last_error = 'first failure' WHERE id = $1`, inv); err != nil {
+		t.Fatal(err)
+	}
+
+	// Control: without a concurrent change the same preview succeeds.
+	if res, err := Preview(ctx, pool, inv, Options{}); err != nil || res.Outcome != OutcomeApply {
+		t.Fatalf("preview without a concurrent replay: %+v, %v; want apply", res, err)
+	}
+
+	hookRan := false
+	opts := Options{LockTimeout: 2 * time.Second, beforeReread: func() {
+		hookRan = true
+		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(hctx, `
+			UPDATE inbox SET status = 'dead', attempts = 8, last_error = 'failed again after replay',
+			       replay_count = replay_count + 1
+			WHERE id = $1`, inv); err != nil {
+			t.Errorf("replay during the preview: %v", err)
+		}
+	}}
+	res, err := Preview(ctx, pool, inv, opts)
+	if !hookRan {
+		t.Fatal("the beforeReread hook did not run")
+	}
+	if !errors.Is(err, ErrChanged) || !strings.Contains(err.Error(), "generation 0 -> 1") {
+		t.Fatalf("preview across a replay that re-failed (dead -> dead): %+v, %v; want ErrChanged naming generation 0 -> 1", res, err)
+	}
+}
+
+// workerMidApply plays a worker inside process for pending event id: it
+// takes the real fence lock (FOR NO KEY UPDATE) and runs the real app.Apply
+// at generation 0, leaving the writes uncommitted. The caller must defer
+// Rollback itself (a t.Cleanup here would run after dbtest's cleanup
+// Truncate, which would then wait on this open transaction) and finishes the
+// apply with workerFinish.
+func workerMidApply(t *testing.T, pool *pgxpool.Pool, id int64) pgx.Tx {
+	t.Helper()
+	ctx := context.Background()
+	worker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload string
+	if err := worker.QueryRow(ctx,
+		`SELECT payload::text FROM inbox WHERE id = $1 AND status = 'pending' FOR NO KEY UPDATE`, id).Scan(&payload); err != nil {
+		worker.Rollback(ctx)
+		t.Fatalf("worker fence: %v", err)
+	}
+	var evt stripeevent.Event
+	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+		worker.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := app.Apply(ctx, worker, changelog.NewApply(id, 0), evt, app.Hooks{}); err != nil {
+		worker.Rollback(ctx)
+		t.Fatalf("worker apply: %v", err)
+	}
+	return worker
+}
+
+// workerFinish completes workerMidApply as process does (mark done, commit)
+// and checks the event is done with wantChanges apply rows in generation 0,
+// i.e. exactly the worker's rows: the preview left nothing behind.
+func workerFinish(t *testing.T, pool *pgxpool.Pool, worker pgx.Tx, id int64, wantChanges int) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := worker.Exec(ctx, `UPDATE inbox SET status = 'done', processed_at = now() WHERE id = $1`, id); err != nil {
+		t.Fatalf("worker mark done: %v", err)
+	}
+	if err := worker.Commit(ctx); err != nil {
+		t.Fatalf("worker commit: %v", err)
+	}
+	if r := dbtest.ReadRow(t, pool, id); r.Status != "done" {
+		t.Fatalf("event after the worker committed: %+v, want done", r)
+	}
+	cl := dbtest.ChangeLog(t, pool, id)
+	if len(cl) != wantChanges {
+		t.Fatalf("change_log after the worker committed: %+v, want %d rows", cl, wantChanges)
+	}
+	for i, r := range cl {
+		if r.Source != "apply" || r.Generation != 0 || r.Seq != i+1 {
+			t.Fatalf("change_log row %+v, want apply, generation 0, seq %d", r, i+1)
+		}
+	}
+}
+
+// The real 5a interleaving, worker still running (TestDBPreviewWaitsForFenceWithoutDeadlock
+// above covers a FOR UPDATE holder, which production code no longer is).
+// The "worker" holds the real fence lock and uncommitted writes from the real
+// app.Apply (workerMidApply). What this proves:
+//   - the preview no longer blocks on the inbox lock: its KEY SHARE does not
+//     conflict with the fence's FOR NO KEY UPDATE, so it overlaps the apply;
+//   - it gives up with ErrBusy within lock_timeout on the first key the
+//     worker holds uncommitted. For customer.created that is the customer's
+//     unique key (the insert comes first); for invoice.paid it is the
+//     worker's change_log_apply_once key (same event, generation, seq 1),
+//     hit when the preview logs its grant, before it reaches the customer
+//     row (the mutation without lock_timeout showed both);
+//   - it writes nothing, and the worker then commits the event done with
+//     exactly its own change_log rows.
+//
+// What it does NOT prove: freedom from deadlock. The 200ms lock_timeout is
+// below deadlock_timeout (1s) and the worker never waits on the preview, so
+// no 40P01 can arise here. That rests on reasoning: the preview runs the
+// same app.Apply as the worker and so takes locks in the same order, and its
+// only extra lock (inbox KEY SHARE, taken first) conflicts with neither the
+// fence nor anything the apply takes.
+//
+// ErrBusy, not ErrChanged, is deterministic here: the worker commits only
+// after the preview has returned. A worker committing mid-preview:
+// TestDBPreviewWorkerCommitsDuringPreview.
+func TestDBPreviewOverlapsRealFence(t *testing.T) {
+	cases := []struct {
+		name        string
+		setup       func(t *testing.T, pool *pgxpool.Pool) int64 // returns the pending event
+		wantChanges int
+	}{
+		{"customer.created: worker inserted the customer", func(t *testing.T, pool *pgxpool.Pool) int64 {
+			return dbtest.InsertEvent(t, pool, "adm_cus", "customer.created", dbtest.CustomerObject(testCustomer))
+		}, 1},
+		{"invoice.paid: worker logged the grant", func(t *testing.T, pool *pgxpool.Pool) int64 {
+			appliedCustomer(t, pool)
+			return dbtest.InsertEvent(t, pool, "adm_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_adm", testCustomer, 2000))
+		}, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pool := dbtest.Pool(t)
+			ctx := context.Background()
+			id := c.setup(t, pool)
+			worker := workerMidApply(t, pool, id)
+			defer worker.Rollback(ctx) // before the cleanup Truncate; no-op after commit
+
+			pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			start := time.Now()
+			res, err := Preview(pctx, pool, id, Options{LockTimeout: 200 * time.Millisecond, StatementTimeout: 3 * time.Second})
+			elapsed := time.Since(start)
+			if !errors.Is(err, ErrBusy) {
+				t.Fatalf("preview overlapping the worker: %+v, %v after %s; want ErrBusy", res, err, elapsed)
+			}
+			if elapsed > 2*time.Second {
+				t.Fatalf("ErrBusy after %s, want about the 200ms lock_timeout", elapsed)
+			}
+			workerFinish(t, pool, worker, id, c.wantChanges)
+		})
+	}
+}
+
+// Reviewer round 2: the NORMAL customer.created race since 5a. A worker
+// apply takes milliseconds, far below the default 2s lock_timeout, so a
+// preview that overlaps it waits on the worker's uncommitted customer
+// insert; when the worker commits, that insert fails with a unique
+// violation (23505). Without the re-read in the error branch the preview
+// returned that raw error; it must be ErrChanged (with the 23505 still
+// wrapped), because the event was simply processed meanwhile.
+//
+// Instead of sleeping a fixed time, the test commits once the preview is
+// actually blocked by the worker (pg_blocking_pids), so the race always
+// takes the path under test.
+func TestDBPreviewWorkerCommitsDuringPreview(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	id := dbtest.InsertEvent(t, pool, "adm_cus", "customer.created", dbtest.CustomerObject(testCustomer))
+	worker := workerMidApply(t, pool, id)
+	defer worker.Rollback(ctx) // before the cleanup Truncate; no-op after commit
+	var workerPID int32
+	if err := worker.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&workerPID); err != nil {
+		t.Fatal(err)
+	}
+
+	type outcome struct {
+		res PreviewResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := Preview(ctx, pool, id, Options{LockTimeout: 2 * time.Second, StatementTimeout: 5 * time.Second})
+		done <- outcome{res, err}
+	}()
+
+	blocked := false
+	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, workerPID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			blocked = true
+			break
+		}
+	}
+	if !blocked {
+		t.Fatal("the preview never blocked on the worker's uncommitted insert")
+	}
+	workerFinish(t, pool, worker, id, 1)
+
+	select {
+	case o := <-done:
+		var pgErr *pgconn.PgError
+		if !errors.Is(o.err, ErrChanged) || !strings.Contains(o.err.Error(), "status pending -> done") {
+			t.Fatalf("preview when the worker committed meanwhile: %+v, %v; want ErrChanged (status pending -> done)", o.res, o.err)
+		}
+		if !errors.As(o.err, &pgErr) || pgErr.Code != "23505" {
+			t.Fatalf("ErrChanged %v does not wrap the original unique violation", o.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("preview did not finish after the worker committed")
+	}
+	// Exactly the worker's customer: the preview wrote nothing.
+	if n := dbtest.Count(t, pool, "customers"); n != 1 {
+		t.Fatalf("customers: %d, want 1", n)
 	}
 }
 

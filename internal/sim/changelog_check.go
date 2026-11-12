@@ -226,15 +226,22 @@ func compareApplyRows(eventID, eventType, status string, got []string, seqs []in
 	return nil
 }
 
-// checkApplyCounts compares every in-scope event's source='apply' rows with
-// expectedApplyTables. Undo rows (phase 6 step 6) are not an event's
-// effect and are excluded. Note for step 5 (replay): this counts all
-// generations together and must then count the current generation only.
+// checkApplyCounts compares every in-scope event's source='apply' rows of
+// its CURRENT generation (change_log.generation = inbox.replay_count) with
+// expectedApplyTables. Undo rows (phase 6 step 6) are not an event's effect
+// and are excluded.
+//
+// Apply rows of any other generation are reported as changelog_unexpected,
+// separately from the current-generation comparison. Replay only starts from
+// dead or stale events, which have no apply rows, so earlier generations are
+// always empty; and a generation above replay_count was never fenced. Either
+// kind of row means the log does not describe what the event did.
 func checkApplyCounts(ctx context.Context, pool *pgxpool.Pool, sc changeLogScope) ([]Violation, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT i.event_id, i.event_type, i.status,
-		       COALESCE(array_agg(cl.table_name ORDER BY cl.seq) FILTER (WHERE cl.id IS NOT NULL), '{}'),
-		       COALESCE(array_agg(cl.seq ORDER BY cl.seq) FILTER (WHERE cl.id IS NOT NULL), '{}')
+		SELECT i.event_id, i.event_type, i.status, i.replay_count,
+		       COALESCE(array_agg(cl.table_name ORDER BY cl.seq) FILTER (WHERE cl.generation = i.replay_count), '{}'),
+		       COALESCE(array_agg(cl.seq ORDER BY cl.seq) FILTER (WHERE cl.generation = i.replay_count), '{}'),
+		       COALESCE(array_agg(DISTINCT cl.generation) FILTER (WHERE cl.generation <> i.replay_count), '{}')
 		FROM inbox i
 		LEFT JOIN change_log cl ON cl.inbox_id = i.id AND cl.source = 'apply'
 		WHERE left(i.event_id, length($1)) = $1
@@ -247,16 +254,30 @@ func checkApplyCounts(ctx context.Context, pool *pgxpool.Pool, sc changeLogScope
 	var v []Violation
 	for rows.Next() {
 		var eventID, eventType, status string
+		var generation int32
 		var tables []string
-		var seqs []int32
-		if err := rows.Scan(&eventID, &eventType, &status, &tables, &seqs); err != nil {
+		var seqs, otherGens []int32
+		if err := rows.Scan(&eventID, &eventType, &status, &generation, &tables, &seqs, &otherGens); err != nil {
 			return nil, err
 		}
 		if bad := compareApplyRows(eventID, eventType, status, tables, seqs); bad != nil {
 			v = append(v, *bad)
 		}
+		if bad := otherGenerationRows(eventID, generation, otherGens); bad != nil {
+			v = append(v, *bad)
+		}
 	}
 	return v, rows.Err()
+}
+
+// otherGenerationRows reports apply rows filed under a generation other than
+// the event's current one (see checkApplyCounts). One violation per event.
+func otherGenerationRows(eventID string, current int32, others []int32) *Violation {
+	if len(others) == 0 {
+		return nil
+	}
+	return &Violation{KindChangeLogUnexpected, eventID,
+		fmt.Sprintf("apply rows in generation(s) %v, but the event is at generation %d (replay_count)", others, current)}
 }
 
 // scopeCTE defines seed_inbox and scope (table_name, row_id) for $1 events,

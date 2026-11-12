@@ -9,6 +9,12 @@
 //  2. PROCESS (one transaction): re-check the claim (fencing), apply the effect,
 //     and mark the row done. A crash here rolls everything back; the event is
 //     retried once its lease expires.
+//
+// Row locks on inbox are FOR NO KEY UPDATE, not FOR UPDATE: still exclusive
+// between claims and fences, but compatible with the FOR KEY SHARE that
+// foreign keys to inbox (change_log, admin_actions) take when an admin
+// transaction inserts rows for the same event. FOR UPDATE would make the
+// fence wait for such a transaction and the claim skip the row.
 package main
 
 import (
@@ -121,19 +127,28 @@ func newWorker(pool *pgxpool.Pool, faults *fault.Injector, lease time.Duration) 
 	}
 }
 
+// claimToken identifies one claim of an inbox row. Both parts are needed:
+// attempts alone repeats after a replay (which resets attempts to 0), so a
+// claim that stalled before the replay could otherwise pass the fence of a
+// later claim with the same attempts value (ABA). replay_count only grows.
+type claimToken struct {
+	attempts   int
+	generation int // inbox.replay_count at claim time; also change_log.generation
+}
+
 // processOne claims and processes at most one ready event.
 func (w *worker) processOne(ctx context.Context) (bool, error) {
-	id, attempts, ok, err := w.claim(ctx)
+	id, tok, ok, err := w.claim(ctx)
 	if err != nil || !ok {
 		return false, err
 	}
-	if attempts > maxAttempts {
+	if tok.attempts > maxAttempts {
 		// Every earlier attempt ended without a recorded result: most likely the
 		// event crashes the worker (a poison event). Stop retrying it.
-		_, err := w.deadLetterCrashed(ctx, id, attempts)
+		_, err := w.deadLetterCrashed(ctx, id, tok)
 		return true, err
 	}
-	return true, w.process(ctx, id, attempts)
+	return true, w.process(ctx, id, tok)
 }
 
 // deadLetterCrashed marks a row dead after a claim found its attempts above
@@ -141,17 +156,19 @@ func (w *worker) processOne(ctx context.Context) (bool, error) {
 // 1..maxAttempts ever ran the event. Claims beyond that only lead here, and
 // one can be lost (killed or stalled before this UPDATE), so claimedAttempts-1
 // could overstate the real count.
-// The attempts guard is a fence like the one in process: if this worker
-// stalled long enough for its lease to expire and another worker re-claimed
-// the row, the row no longer has our attempts value and we must not touch it.
+// The (attempts, replay_count) guard is a fence like the one in process: if
+// this worker stalled long enough for its lease to expire and another worker
+// re-claimed the row (possibly after an admin replay reset attempts), the row
+// no longer carries our token and we must not touch it.
 // Reports whether the row was updated.
-func (w *worker) deadLetterCrashed(ctx context.Context, id int64, claimedAttempts int) (bool, error) {
+func (w *worker) deadLetterCrashed(ctx context.Context, id int64, tok claimToken) (bool, error) {
 	tag, err := w.pool.Exec(ctx, `
 		UPDATE inbox
 		SET status = 'dead', attempts = $2, processed_at = now(),
 		    last_error = format('gave up after %s attempts; last error: %s', $2::int,
 		        COALESCE(last_error, 'none recorded (the worker crashed or was killed while processing)'))
-		WHERE id = $1 AND status = 'pending' AND attempts = $3`, id, maxAttempts, claimedAttempts)
+		WHERE id = $1 AND status = 'pending' AND attempts = $3 AND replay_count = $4`,
+		id, maxAttempts, tok.attempts, tok.generation)
 	if err != nil {
 		return false, fmt.Errorf("dead-letter: %w", err)
 	}
@@ -164,11 +181,15 @@ func (w *worker) deadLetterCrashed(ctx context.Context, id int64, claimedAttempt
 }
 
 // claim records an attempt and leases the oldest ready event, in one statement
-// that commits immediately.
-func (w *worker) claim(ctx context.Context) (int64, int, bool, error) {
+// that commits immediately. SKIP LOCKED skips rows a fence (or another claim)
+// holds. FOR NO KEY UPDATE, unlike FOR UPDATE, does not count a foreign-key
+// KEY SHARE lock (an admin transaction writing change_log or admin_actions
+// rows for the event) as "locked", so such a row is still claimed
+// (TestDBKeyShareDoesNotBlockClaimOrFence).
+func (w *worker) claim(ctx context.Context) (int64, claimToken, bool, error) {
 	var (
-		id       int64
-		attempts int
+		id  int64
+		tok claimToken
 	)
 	err := w.pool.QueryRow(ctx, `
 		WITH next AS (
@@ -176,39 +197,41 @@ func (w *worker) claim(ctx context.Context) (int64, int, bool, error) {
 			WHERE status = 'pending' AND next_attempt_at <= now()
 			ORDER BY id
 			LIMIT 1
-			FOR UPDATE SKIP LOCKED
+			FOR NO KEY UPDATE SKIP LOCKED
 		)
 		UPDATE inbox AS i
 		SET attempts = i.attempts + 1,
 		    next_attempt_at = now() + make_interval(secs => $1)
 		FROM next
 		WHERE i.id = next.id
-		RETURNING i.id, i.attempts`, w.lease.Seconds()).Scan(&id, &attempts)
+		RETURNING i.id, i.attempts, i.replay_count`, w.lease.Seconds()).Scan(&id, &tok.attempts, &tok.generation)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, false, nil
+		return 0, claimToken{}, false, nil
 	}
 	if err != nil {
-		return 0, 0, false, fmt.Errorf("claim: %w", err)
+		return 0, claimToken{}, false, fmt.Errorf("claim: %w", err)
 	}
-	return id, attempts, true, nil
+	return id, tok, true, nil
 }
 
-func (w *worker) process(ctx context.Context, id int64, attempts int) error {
+func (w *worker) process(ctx context.Context, id int64, tok claimToken) error {
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx) // no-op after a successful commit
 
-	// Fencing: only proceed if our claim is still the latest one. FOR UPDATE
+	// Fencing: only proceed if our claim is still the latest one, i.e. the row
+	// still carries our (attempts, replay_count) token. FOR NO KEY UPDATE
 	// holds the row until commit, so claim (SKIP LOCKED) cannot re-claim it
-	// mid-apply even if our lease expires. Not directly tested: the DB tests
-	// hold an equivalent lock themselves (see main_db_test.go).
+	// mid-apply even if our lease expires (TestDBFenceLockBlocksReclaimMidApply),
+	// while an admin transaction's foreign-key KEY SHARE on the row does not
+	// make us wait (TestDBKeyShareDoesNotBlockClaimOrFence).
 	var payload string
 	err = tx.QueryRow(ctx, `
 		SELECT payload::text FROM inbox
-		WHERE id = $1 AND status = 'pending' AND attempts = $2
-		FOR UPDATE`, id, attempts).Scan(&payload)
+		WHERE id = $1 AND status = 'pending' AND attempts = $2 AND replay_count = $3
+		FOR NO KEY UPDATE`, id, tok.attempts, tok.generation).Scan(&payload)
 	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("lost claim on inbox row %d (lease expired and it was re-claimed)", id)
 		return nil
@@ -222,7 +245,7 @@ func (w *worker) process(ctx context.Context, id int64, attempts int) error {
 		return finish(ctx, tx, id, "dead", fmt.Sprintf("decode payload: %v", err))
 	}
 	if fault.PoisonEnabled() && evt.Type == fault.PoisonType {
-		log.Printf("POISON: %s crashes the worker (attempt %d)", evt.ID, attempts)
+		log.Printf("POISON: %s crashes the worker (attempt %d)", evt.ID, tok.attempts)
 		os.Exit(1)
 	}
 
@@ -234,8 +257,10 @@ func (w *worker) process(ctx context.Context, id int64, attempts int) error {
 	if err != nil {
 		return fmt.Errorf("savepoint: %w", err)
 	}
-	// generation 0: replay (phase 6 step 5) will pass inbox.replay_count.
-	rec := changelog.NewApply(id, 0)
+	// The generation the fence just confirmed: a replayed event's changes are
+	// filed under its new generation, so they neither collide with the unique
+	// index nor mix with what an earlier generation logged.
+	rec := changelog.NewApply(id, tok.generation)
 	applyErr := app.Apply(ctx, sp, rec, evt, w.hooks)
 
 	switch {
@@ -261,13 +286,14 @@ func (w *worker) process(ctx context.Context, id int64, attempts int) error {
 		if err := sp.Rollback(ctx); err != nil {
 			return fmt.Errorf("rollback savepoint: %w", err)
 		}
-		if attempts >= maxAttempts {
-			log.Printf("DEAD %s (%s) after %d attempts: %v", evt.ID, evt.Type, attempts, applyErr)
+		if tok.attempts >= maxAttempts {
+			log.Printf("DEAD %s (%s) after %d attempts: %v", evt.ID, evt.Type, tok.attempts, applyErr)
 			return finish(ctx, tx, id, "dead", applyErr.Error())
 		}
-		delay := backoff(attempts)
+		delay := backoff(tok.attempts)
 		log.Printf("retry %s (%s) in %s, attempt %d/%d: %v",
-			evt.ID, evt.Type, delay, attempts, maxAttempts, applyErr)
+			evt.ID, evt.Type, delay, tok.attempts, maxAttempts, applyErr)
+		// Keyed on id only: safe because this tx holds the fence lock.
 		if _, err := tx.Exec(ctx, `
 			UPDATE inbox
 			SET last_error = $2, next_attempt_at = now() + make_interval(secs => $3)
@@ -283,6 +309,8 @@ func (w *worker) process(ctx context.Context, id int64, attempts int) error {
 
 // finish records the final status and commits the whole transaction,
 // including the event's effect. Attempts were already counted by claim.
+// Keyed on id only: safe because tx holds the fence lock (no other claim or
+// replay can change the row's token before this commits).
 func finish(ctx context.Context, tx pgx.Tx, id int64, status, lastErr string) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE inbox
