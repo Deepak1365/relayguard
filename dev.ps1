@@ -39,12 +39,15 @@ switch ($Task) {
         Invoke-Sql @("SELECT id, event_id, event_type, status, attempts, left(last_error, 70) AS last_error FROM inbox ORDER BY id;")
     }
     "reset-data" {
-        Invoke-Sql @("TRUNCATE inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")
+        # change_log and admin_actions reference inbox, so they must go in the
+        # same TRUNCATE. Wiping the admin audit here is a deliberate choice:
+        # its rows point at inbox ids that RESTART IDENTITY reuses.
+        Invoke-Sql @("TRUNCATE change_log, admin_actions, inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")
     }
     "test"           { go vet ./...; if ($LASTEXITCODE -eq 0) { go test ./... }; exit $LASTEXITCODE }
     "db-test" {
-        # Worker integration tests against the dev database. They TRUNCATE the
-        # inbox and app tables (and refuse if the inbox has rows they did not
+        # DB integration tests against the dev database. They TRUNCATE the
+        # inbox, app, change_log and admin_actions tables (and refuse if the inbox has rows they did not
         # create). Uses DATABASE_URL if set, otherwise the non-secret dev URL
         # from .env.example. The URL is never printed.
         # Before running: stop any worker (it polls and could claim the test
@@ -54,7 +57,9 @@ switch ($Task) {
             $env:DATABASE_URL = "postgres://relayguard:relayguard@localhost:5433/relayguard?sslmode=disable"
         }
         $env:RELAYGUARD_DB_TESTS = "1"
-        go test -count=1 -v ./cmd/worker/
+        # -p 1: the packages share the same tables, so they must not run in
+        # parallel or one package's TRUNCATE wipes another's rows mid-test.
+        go test -count=1 -p 1 -v ./cmd/worker/ ./internal/dbtest/ ./internal/sim/
         exit $LASTEXITCODE
     }
     "build" {
@@ -75,9 +80,9 @@ switch ($Task) {
         Write-Host "  send <file> [count]    sign and POST a fixture event"
         Write-Host "  state                  balances, ledger, subscriptions"
         Write-Host "  inbox                  inbox rows: status, attempts, errors"
-        Write-Host "  reset-data             empty app tables and inbox (keeps schema)"
+        Write-Host "  reset-data             empty app tables, inbox, change_log, admin_actions (keeps schema)"
         Write-Host "  test                   go vet + go test"
-        Write-Host "  db-test                worker DB integration tests (TRUNCATES inbox and app tables)"
+        Write-Host "  db-test                DB integration tests (TRUNCATES inbox, app, change_log, admin_actions)"
         Write-Host "  build                  build worker, naive and chaos into bin\"
     }
 }

@@ -17,9 +17,12 @@ type Violation struct {
 	Detail  string
 }
 
-// Reset empties the app tables and the inbox before a run.
+// Reset empties the app tables, the inbox and the change/audit tables before a
+// run. change_log and admin_actions reference inbox, so TRUNCATE inbox alone
+// would be refused once they exist; listing them keeps every run starting from
+// a clean, consistent log. The caller (cmd/chaos) adds the "reset:" context.
 func Reset(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `TRUNCATE inbox, subscriptions, credit_grants, customers RESTART IDENTITY`)
+	_, err := pool.Exec(ctx, `TRUNCATE change_log, admin_actions, inbox, subscriptions, credit_grants, customers RESTART IDENTITY`)
 	return err
 }
 

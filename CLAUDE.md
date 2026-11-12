@@ -34,7 +34,9 @@ a deliberately naive baseline. Honest evidence matters more than features.
 
 ## Status
 Phases 1-5 complete (baseline, inbox + transactional worker, ordering, chaos harness with crashes,
-claim with lease + poison dead-lettering). Next: Phase 6 (change log, preview, replay, undo). See docs/ROADMAP.md.
+claim with lease + poison dead-lettering). Phase 6 (change log, preview, replay, undo) is in progress:
+step 1 of 7 done (migration 00004: change_log, admin_actions, row_version trigger; shared internal/dbtest).
+Next: step 2, change capture in internal/app and the worker. See docs/ROADMAP.md.
 
 ## Rules (all agents)
 1. Never run `dev.ps1 reset` or `docker compose down -v` (deletes the database). `dev.ps1 reset-data` is fine.
