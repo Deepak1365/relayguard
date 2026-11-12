@@ -2,16 +2,20 @@
 //
 //	admin preview <inbox-id>   what would applying this event change now? (writes nothing)
 //	admin log <inbox-id>       what did this event change, and what did admins do to it?
+//	admin replay <inbox-id> -actor <name> -reason "<text>"
+//	                           put a dead or stale event back in the queue (audited)
 //
 // Exit codes: 0 when the command completed (for preview: any outcome,
-// including "the apply would fail"), 1 when it was refused or failed (done
-// event, busy rows, changed meanwhile, not found, database error), 2 for
-// usage errors.
+// including "the apply would fail"; for replay: the replay was done), 1 when
+// it was refused or failed (done event, not replayable, busy rows, changed
+// meanwhile, not found, database error), 2 for usage errors (including a
+// missing or too long -actor / -reason).
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -25,28 +29,66 @@ import (
 
 const usage = `usage:
   admin preview <inbox-id>   show what applying the event now would change (rolled back, writes nothing)
-  admin log <inbox-id>       show the event's change_log rows and admin actions`
+  admin log <inbox-id>       show the event's change_log rows and admin actions
+  admin replay <inbox-id> -actor <name> -reason "<text>"
+                             replay a dead or stale event (both flags required; audited)`
 
 // command is a parsed command line.
 type command struct {
-	name    string // preview or log
+	name    string // preview, log or replay
 	inboxID int64
+	actor   string // replay only, trimmed
+	reason  string // replay only, trimmed
 }
 
 // parseArgs validates the command line (os.Args[1:]). Pure, unit tested.
+// For replay it also applies admin.NormalizeReplayRequest, so a missing or
+// too long actor/reason is a usage error before settings or the database
+// are touched.
 func parseArgs(args []string) (command, error) {
-	if len(args) != 2 {
+	if len(args) < 2 {
 		return command{}, errors.New("expected a command and an inbox id")
 	}
 	name := args[0]
-	if name != "preview" && name != "log" {
+	if name != "preview" && name != "log" && name != "replay" {
 		return command{}, fmt.Errorf("unknown command %q", name)
 	}
 	id, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil || id <= 0 {
 		return command{}, fmt.Errorf("inbox id must be a positive integer, got %q", args[1])
 	}
-	return command{name: name, inboxID: id}, nil
+	cmd := command{name: name, inboxID: id}
+	if name != "replay" {
+		if len(args) != 2 {
+			return command{}, fmt.Errorf("%s takes only an inbox id", name)
+		}
+		return cmd, nil
+	}
+
+	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // errors are returned and printed with the usage
+	actor := fs.String("actor", "", "who is replaying (required)")
+	reason := fs.String("reason", "", "why (required)")
+	if err := fs.Parse(args[2:]); err != nil {
+		return command{}, fmt.Errorf("replay: %w", err)
+	}
+	if fs.NArg() != 0 {
+		return command{}, fmt.Errorf("replay: unexpected arguments %q (quote a reason that has spaces)", fs.Args())
+	}
+	req, err := admin.NormalizeReplayRequest(admin.ReplayRequest{InboxID: id, Actor: *actor, Reason: *reason})
+	if err != nil {
+		return command{}, err
+	}
+	cmd.actor, cmd.reason = req.Actor, req.Reason
+	return cmd, nil
+}
+
+// replayReportable reports whether a Replay result may be printed as a
+// report: only when it succeeded or the refusal was audited and committed.
+// After any other error no audit row is guaranteed, and "refused, audit
+// action #0" would be false.
+func replayReportable(err error) bool {
+	return err == nil || errors.Is(err, admin.ErrNotReplayable)
 }
 
 func main() {
@@ -94,6 +136,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprint(stdout, admin.FormatLog(res))
+	case "replay":
+		res, err := admin.Replay(ctx, pool,
+			admin.ReplayRequest{InboxID: cmd.inboxID, Actor: cmd.actor, Reason: cmd.reason}, admin.Options{})
+		if replayReportable(err) {
+			// Done or refused-and-audited: an audit row exists; show it.
+			fmt.Fprint(stdout, admin.FormatReplay(res))
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "admin: replay refused or failed: %v\n", err)
+			return 1
+		}
 	}
 	return 0
 }

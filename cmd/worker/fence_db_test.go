@@ -1,38 +1,38 @@
 package main
 
-// Fence and lock-mode tests (phase 6 step 5a). Same rules as main_db_test.go:
-// skipped unless DB tests are enabled, run through `dev.ps1 db-test`.
-//
-// The replays here are raw SQL (status pending, attempts 0, replay_count+1),
-// standing in for admin.Replay, which arrives in step 5b.
+// Fence, lock-mode and replay tests (phase 6 steps 5a and 5b). Same rules as
+// main_db_test.go: skipped unless DB tests are enabled, run through
+// `dev.ps1 db-test`.
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Deepak1365/relayguard/internal/admin"
 	"github.com/Deepak1365/relayguard/internal/app"
 	"github.com/Deepak1365/relayguard/internal/dbtest"
 )
 
-// replayRaw does what an admin replay does to the inbox row: back to
-// pending with a fresh attempt budget, in a new generation.
-func replayRaw(t *testing.T, pool *pgxpool.Pool, id int64) {
+// replay runs the real admin.Replay (step 5b), which replaced the raw-SQL
+// stand-in 5a used. It can produce every state these tests need, so no raw
+// replay helper is left.
+func replay(t *testing.T, pool *pgxpool.Pool, id int64) {
 	t.Helper()
-	tag, err := pool.Exec(context.Background(), `
-		UPDATE inbox
-		SET status = 'pending', attempts = 0, last_error = NULL, processed_at = NULL,
-		    next_attempt_at = now(), replay_count = replay_count + 1
-		WHERE id = $1`, id)
-	if err != nil || tag.RowsAffected() != 1 {
-		t.Fatalf("replay inbox row %d: rows=%d err=%v", id, tag.RowsAffected(), err)
+	res, err := admin.Replay(context.Background(), pool,
+		admin.ReplayRequest{InboxID: id, Actor: "dbtest", Reason: "worker test"}, admin.Options{})
+	if err != nil || res.Outcome != admin.ReplayDone {
+		t.Fatalf("replay inbox row %d: %+v, %v", id, res, err)
 	}
 }
 
 // markDead records an outcome some other worker reached while the claim
-// under test was stalled (replay only starts from dead or stale).
+// under test was stalled (replay only starts from dead or stale). Raw SQL on
+// purpose: the tests need exactly "dead" while a claim is outstanding, which
+// the real worker only produces after maxAttempts.
 func markDead(t *testing.T, pool *pgxpool.Pool, id int64) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `
@@ -169,7 +169,7 @@ func TestDBReplayFencesOldClaim(t *testing.T) {
 		t.Fatalf("claim A: token=%+v ok=%v err=%v, want attempts 1 generation 0", tokA, ok, err)
 	}
 	markDead(t, pool, rowID)
-	replayRaw(t, pool, rowID)
+	replay(t, pool, rowID)
 	_, tokC, ok, err := c.claim(ctx)
 	if err != nil || !ok || tokC != (claimToken{attempts: 1, generation: 1}) {
 		t.Fatalf("claim C after replay: token=%+v ok=%v err=%v, want attempts 1 generation 1", tokC, ok, err)
@@ -218,7 +218,7 @@ func TestDBDeadLetterFencedByGeneration(t *testing.T) {
 		t.Fatalf("claim A: token=%+v ok=%v err=%v", tokA, ok, err)
 	}
 	markDead(t, pool, rowID)
-	replayRaw(t, pool, rowID)
+	replay(t, pool, rowID)
 	dbtest.SetAttempts(t, pool, rowID, maxAttempts)
 	_, tokB, ok, err := b.claim(ctx)
 	if err != nil || !ok || tokB != (claimToken{attempts: maxAttempts + 1, generation: 1}) {
@@ -242,5 +242,97 @@ func TestDBDeadLetterFencedByGeneration(t *testing.T) {
 	}
 	if r := dbtest.ReadRow(t, pool, rowID); r.Status != "dead" || r.Attempts != maxAttempts {
 		t.Fatalf("row after B: %+v, want dead with attempts %d", r, maxAttempts)
+	}
+}
+
+// The point of replay: an invoice that arrived before its customer is dead
+// (unknown customer, last attempt). The customer arrives, an admin replays
+// the invoice, and the real worker applies it under generation 1: a new set
+// of change_log rows (the unique index allows it), numbered from 1, and the
+// effect applied exactly once.
+func TestDBReplayedDeadEventApplies(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	w := newTestWorker(pool)
+	inv := invoiceForMissingCustomer(t, pool, "rp_dead")
+	dbtest.SetAttempts(t, pool, inv, maxAttempts-1)
+	processN(t, w, 1)
+	if r := dbtest.ReadRow(t, pool, inv); r.Status != "dead" || !strings.Contains(r.LastErr, "unknown customer") {
+		t.Fatalf("setup: %+v, want dead (unknown customer)", r)
+	}
+	if n := dbtest.Count(t, pool, "change_log"); n != 0 {
+		t.Fatalf("dead event logged %d rows", n)
+	}
+
+	dbtest.InsertEvent(t, pool, "rp_dead_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_missing"))
+	processN(t, w, 1) // the customer (the dead invoice is not pending)
+	replay(t, pool, inv)
+	processN(t, w, 1)
+
+	r := dbtest.ReadRow(t, pool, inv)
+	if r.Status != "done" || r.Attempts != 1 || r.LastErr != "" {
+		t.Fatalf("replayed event: %+v, want done after 1 attempt with no last_error", r)
+	}
+	cl := dbtest.ChangeLog(t, pool, inv)
+	if len(cl) != 2 {
+		t.Fatalf("replayed event change_log: %+v, want 2 rows", cl)
+	}
+	// (wantChange asserts generation 0, so the rows are checked by hand.)
+	for i, want := range []struct{ table, op string }{{"credit_grants", "insert"}, {"customers", "update"}} {
+		c := cl[i]
+		if c.Source != "apply" || c.Generation != 1 || c.Seq != i+1 || c.Table != want.table || c.Op != want.op {
+			t.Fatalf("change_log row %+v, want apply, generation 1, seq %d, %s %s", c, i+1, want.op, want.table)
+		}
+	}
+	var balance int64
+	if err := pool.QueryRow(ctx,
+		`SELECT credit_balance FROM customers WHERE stripe_customer_id = 'cus_dbtest_missing'`).Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if n := dbtest.Count(t, pool, "credit_grants"); n != 1 || balance != 20 {
+		t.Fatalf("grants %d, balance %d, want exactly 1 grant and balance 20", n, balance)
+	}
+	// Chain and final-state checks of the whole log are the checker's job:
+	// sim.TestDBChangeLogCheckReplayedEventClean runs it over a replayed history.
+}
+
+// A stale event replayed is judged again against the subscription's current
+// state: still older than what applied, so stale again with nothing logged,
+// and the replay is visible only in replay_count and the audit trail.
+func TestDBReplayedStaleEventIsStaleAgain(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	w := newTestWorker(pool)
+	dbtest.InsertEvent(t, pool, "rs_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_rs"))
+	dbtest.InsertEventAt(t, pool, "rs_new", "customer.subscription.updated", dbtest.DefaultCreated+10,
+		dbtest.SubscriptionObject("sub_dbtest_rs", "cus_dbtest_rs", "past_due"))
+	old := dbtest.InsertEventAt(t, pool, "rs_old", "customer.subscription.updated", dbtest.DefaultCreated,
+		dbtest.SubscriptionObject("sub_dbtest_rs", "cus_dbtest_rs", "active"))
+	processN(t, w, 3)
+	wantStatus(t, pool, old, "stale")
+	logged := dbtest.Count(t, pool, "change_log")
+
+	replay(t, pool, old)
+	wantStatus(t, pool, old, "pending")
+	processN(t, w, 1)
+
+	wantStatus(t, pool, old, "stale")
+	var replays int
+	if err := pool.QueryRow(ctx, `SELECT replay_count FROM inbox WHERE id = $1`, old).Scan(&replays); err != nil {
+		t.Fatal(err)
+	}
+	if replays != 1 {
+		t.Fatalf("replay_count %d, want 1", replays)
+	}
+	if n := dbtest.Count(t, pool, "change_log"); n != logged {
+		t.Fatalf("change_log: %d rows, want %d (a stale replay changes nothing)", n, logged)
+	}
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM subscriptions WHERE stripe_subscription_id = 'sub_dbtest_rs'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "past_due" {
+		t.Fatalf("subscription status %s, want past_due (the newer event still wins)", status)
 	}
 }

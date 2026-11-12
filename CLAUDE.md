@@ -34,39 +34,44 @@ a deliberately naive baseline. Honest evidence matters more than features.
 
 ## Status
 Phases 1-5 complete and pushed (baseline, inbox + transactional worker, ordering, chaos harness with
-crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-4 pushed (fe27b99, d2e3cf3, b56731c, 052c0f5).
-Step 5a implemented, reviewed and approved, awaiting the user's OK to commit (then push separately).
+crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-5a pushed (fe27b99, d2e3cf3, b56731c, 052c0f5,
+425f62d). 9959dce (agent model tiers + token discipline) committed, not pushed: it goes up together with 5b.
+Step 5b implemented, reviewed and approved, awaiting the user's OK to commit (then push both).
 
 Handoff (2026-11-12):
-- Just finished: Phase 6 step 5a. Migration 00005 (inbox.replay_count + CHECKs inbox_replay_count_nonneg,
-  change_log_generation_nonneg, change_log_seq_positive) applied to the dev DB. Worker claimToken{attempts,
-  generation}: fence and deadLetterCrashed check BOTH (ABA fix: replay resets attempts); claim and fence use
-  FOR NO KEY UPDATE (no longer conflict with FK KEY SHARE, still exclude each other). Preview and
-  dbtest.ApplyInbox use replay_count as generation. CheckChangeLog compares only the current generation;
-  other-generation apply rows -> changelog_unexpected. Review fixes: Preview re-reads status AND replay_count
-  at the end and after a failed apply (customer.created race with the worker now gives ErrChanged, not a raw
-  23505). 3 review rounds; 70 DB tests + 21 subtests pass; all mutations caught (listed in the plan note).
-  Regression on the final build (uncommitted tree, not evidence): crash seeds 1-3 and poison seeds 1-2
-  (-poison 2, dead=2 each) both 0 violations. Dev DB empty (reset-data after the smoke).
-- In progress: Phase 6. Step 5b (admin replay, audited) is APPROVED and not started. Steps 6-7 still need user
-  approval. Results docs that compare relayguard vs naive must say relayguard runs carry extra changelog_* checks.
-- For 5b: TestDBReplayFencesOldClaim and the replay tests use raw-SQL replays (replayRaw in
-  cmd/worker/fence_db_test.go); switch them to admin.Replay as the plan says. admin.Replay must bump
-  replay_count in the same statement that resets attempts. bin/worker-phase4.exe runs against 00005 but ignores
-  replay_count, so it must not be used once replays exist (the optional compatibility smoke is before any replay).
-- Decisions not written elsewhere: commit and push each step separately (5a, then 5b); 5a and 5b stop at
-  checkpoint B before commit and before push. The user lets the lead pick routine commands/options without
-  asking (still ask for deletions, pushes, and irreversible operations). The user does not start
-  worker/receiver: the lead starts the receiver in the background for chaos runs and stops it afterwards.
-  Regression smokes on a dirty tree go to the scratchpad, not results/ (evidence only from a clean tree, step 7).
+- Just finished: Phase 6 step 5b. internal/admin/replay.go: Replay (dead/stale only; one tx with lock_timeout;
+  SELECT inbox FOR NO KEY UPDATE; undone guard; refusals audited 'refused' and committed -> ErrNotReplayable;
+  accept = one UPDATE resetting status/attempts/last_error/processed_at/next_attempt_at and bumping
+  replay_count, plus a 'done' audit row with from_* detail and generation; input validated before the DB;
+  Outcome set only after commit). CLI `admin replay <id> -actor <name> -reason "<text>"` (flags after the id;
+  report printed only for success/refusal). Poison warning in two levels from shared constants in
+  internal/app/deadletter.go (GaveUpPrefix, NoResultRecorded, DecodePayloadPrefix), so the worker text and the
+  admin reader cannot drift. replayRaw removed; worker/sim tests use the real Replay. 2 review rounds; 87 DB
+  tests pass; 15 mutations caught (plan note). Regression on the final build (uncommitted, not evidence): crash
+  seeds 1-3, poison seeds 1-2 (dead=2 each) and compatibility seed 1 with bin/worker-phase4.exe all 0
+  violations. Dev DB empty (reset-data after the smoke).
+  Earlier this session: 5a (425f62d) replay_count fence token, FOR NO KEY UPDATE claim/fence, generation-aware
+  checker, preview re-reads status+replay_count.
+- In progress: Phase 6. Steps 6 (undo with conflict explanations) and 7 (evidence) need user approval: start
+  step 6 with the planner and checkpoint A. Results docs that compare relayguard vs naive must say relayguard
+  runs carry extra changelog_* checks.
+- For step 6 (from reviews): undo must take the inbox row lock (FOR NO KEY UPDATE) FIRST, like Replay, or a
+  concurrent undo could commit after Replay's undone guard has read. Undo rows take the generation of the
+  apply they revert. bin/worker-phase4.exe ignores replay_count: do not use it once replays exist.
+- Decisions not written elsewhere: commit and push each step separately; stop at checkpoint B before commit and
+  before push. The user lets the lead pick routine commands/options without asking (still ask for deletions,
+  pushes, and irreversible operations). The user does not start worker/receiver: the lead starts the receiver
+  in the background for chaos runs and stops it afterwards. Regression smokes on a dirty tree go to the
+  scratchpad, not results/ (evidence only from a clean tree, step 7). /verify's chaos step needs no rerun when
+  the same smoke already ran on the same build.
 - User decisions (also in the plan): strict row-version undo (refuse if changed since; in practice newest
   first per customer); row_version via a BEFORE UPDATE trigger; reset-data also wipes admin_actions; undone
   events are not replayable; previews are not audited; no change_log retention for now. Optional step-7
   experiments E4 (undo-all property run) and E5 (naive rerun) are UNDECIDED: ask the user at step 7.
   Keep the Phase 4 worktree C:/dev/relayguard-phase4 and bin/worker-phase4.exe.
-- Uncommitted: step 5a (incl. untracked migrations/00005_replay.sql and cmd/worker/fence_db_test.go).
+- Uncommitted: step 5b (incl. untracked internal/admin/replay*.go and internal/app/deadletter.go).
   Keep the tree clean before any evidence build: untracked files set vcs.modified=true.
-- Next step: after the 5a commit/push, Phase 6 step 5b via /next-phase (already approved).
+- Next step: after the 5b commit and the push of 9959dce + 5b, plan Phase 6 step 6 (planner -> user approval).
   Interview notes for steps 1-5 are deferred to the end of Phase 6 (lessons so far: lock strength vs FK
   KEY SHARE; consistent lock order prevents deadlocks (preview inbox-first); repeat tests whose bug depends
   on random map order; one control per rule, because rules that report the same kind mask each other;
@@ -74,7 +79,9 @@ Handoff (2026-11-12):
   counter needs a monotonic generation in the fence token; weaker lock modes change who overlaps whom, so
   re-check every "can't happen" race (preview now overlaps the worker); a test must be able to fail for the
   claim it makes (40P01 assert under a 200ms lock_timeout could not); re-read state after a failed statement
-  via savepoint rollback).
+  via savepoint rollback; 5b: audit honesty (report an outcome only after its audit row commits); refusals
+  are audited too; shared constants between a free-text writer and its parser; a heuristic warning must not
+  claim more than its signal supports).
 - Notes: gh is at "C:\Program Files\GitHub CLI\gh.exe" if it is not on PATH. Background agents survive
   /clear, so check for running agents and tasklist before builds or experiments.
 

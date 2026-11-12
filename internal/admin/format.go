@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Deepak1365/relayguard/internal/app"
 	"github.com/Deepak1365/relayguard/internal/changelog"
 )
 
@@ -56,6 +57,81 @@ func FormatLog(r LogResult) string {
 			a.ID, utc(a.CreatedAt), a.Action, a.Outcome, a.Actor, a.Reason, a.Detail)
 	}
 	return b.String()
+}
+
+// FormatReplay renders a replay result (done or refused) for a terminal.
+// Pure. For a done replay it adds a warning based on the previous last_error
+// (see CrashedLastError): a strong one when no attempt ever recorded a result
+// (likely poison), a hedged one when only the final attempt(s) ended without a
+// result, and one for a payload decode failure (it will fail the same way).
+func FormatReplay(r ReplayResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "REPLAY inbox %d (%s, %s): %s, audit action #%d\n",
+		r.InboxID, r.EventID, r.EventType, r.Outcome, r.ActionID)
+	processed := "none"
+	if r.FromProcessedAt != nil {
+		processed = utc(*r.FromProcessedAt)
+	}
+	fmt.Fprintf(&b, "was: status %s, attempts %d, processed_at %s, generation %d\n",
+		r.FromStatus, r.FromAttempts, processed, r.wasGeneration())
+	if r.FromLastError != "" {
+		fmt.Fprintf(&b, "was last_error: %s\n", r.FromLastError)
+	}
+	switch r.Outcome {
+	case ReplayDone:
+		fmt.Fprintf(&b, "now: status pending, attempts 0, generation %d; the worker will pick it up\n", r.Generation)
+		switch CrashedLastError(r.FromLastError) {
+		case CrashLikely:
+			b.WriteString("warning: the last error says the worker crashed on this event (possible poison event); " +
+				"the replay will likely crash it again and dead-letter it after the full attempt budget\n")
+		case CrashPossible:
+			b.WriteString("warning: the final attempt(s) ended without a result (crash, kill or lease expiry); " +
+				"if it is a poison event it will dead-letter again\n")
+		}
+		// The worker stores this text for a payload it cannot decode; the
+		// payload does not change on replay.
+		if strings.HasPrefix(r.FromLastError, app.DecodePayloadPrefix) {
+			b.WriteString("warning: the last error is a payload decode failure; a replay will most likely fail the same way\n")
+		}
+	case ReplayRefused:
+		fmt.Fprintf(&b, "refused: %s (nothing changed; the refusal is audited)\n", r.Reason)
+	}
+	return b.String()
+}
+
+// wasGeneration is the generation before the request: a done replay raised
+// it by one.
+func (r ReplayResult) wasGeneration() int {
+	if r.Outcome == ReplayDone {
+		return r.Generation - 1
+	}
+	return r.Generation
+}
+
+// CrashSign says how strongly a last_error suggests a poison event.
+type CrashSign int
+
+const (
+	CrashNone     CrashSign = iota // normal error, or none
+	CrashPossible                  // the final attempt(s) ended without a result
+	CrashLikely                    // no attempt ever recorded a result
+)
+
+// CrashedLastError classifies last_error written by the worker's
+// deadLetterCrashed (texts shared via app.GaveUpPrefix / app.NoResultRecorded;
+// the worker's normal dead path stores the apply error itself, without the
+// prefix). The bare prefix is only "possible": a single kill or lease expiry
+// on the last attempt also writes it, after earlier attempts recorded a real
+// error. Only "none recorded" means every attempt crashed.
+func CrashedLastError(lastErr string) CrashSign {
+	switch {
+	case !strings.HasPrefix(lastErr, app.GaveUpPrefix):
+		return CrashNone
+	case strings.HasSuffix(lastErr, "last error: "+app.NoResultRecorded):
+		return CrashLikely
+	default:
+		return CrashPossible
+	}
 }
 
 // changeLine is changelog.Format, falling back to a marker instead of

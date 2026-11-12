@@ -243,5 +243,65 @@ As implemented (5a, 2026-11-12; reviewed and approved, reviewer follow-ups appli
 - 00004 notes: admin_actions has no generation column (kept in detail JSON); outcome only done/refused (busy writes nothing);
   inbox status has no 'undone' (step 6 needs 00006 if it wants one).
 
+As implemented (5b, implementer, 2026-11-12; reviewed, with the follow-ups below):
+- No new migration. admin_actions columns used as in 00004; refused detail = {status, attempts, generation, refused}; done detail =
+  {from_status, from_attempts, from_last_error, from_processed_at, generation (= the new replay_count)}.
+- internal/admin/replay.go: Replay, ReplayRequest/Result, NormalizeReplayRequest (pure; trim, non-empty, <= 200 / 1000 runes, id > 0),
+  ErrNotReplayable, ErrInvalidInput. Flow as planned: validate (no DB), lock_timeout/statement_timeout, SELECT inbox FOR NO KEY UPDATE,
+  undone guard (min id of an undo row with outcome 'done'; a refused undo does not count), allow-list dead/stale, then either an audited
+  refusal (committed, returns ErrNotReplayable) or ONE UPDATE (status pending, attempts 0, last_error NULL, processed_at NULL,
+  next_attempt_at now(), replay_count+1) plus a 'done' audit row. The from_* values come from the locked SELECT (PG 17 UPDATE RETURNING
+  has no old values); the lock guarantees nothing changed in between. Options gained an unexported test hook afterLock.
+- cmd/admin: `admin replay <id> -actor <name> -reason "<text>"`. Flags go AFTER the id; any order; both required. parseArgs applies
+  NormalizeReplayRequest, so missing/blank/too long flags are usage errors (exit 2) before settings or the DB are touched. Exit 0 =
+  replay done; 1 = refused, busy, not found or error (a refusal still prints the REPLAY report, since it is audited). FormatReplay
+  warns at two levels (review fix): strong ("will likely crash it again") only for "...last error: none recorded (the worker crashed
+  or was killed while processing)", i.e. no attempt ever recorded a result; soft ("final attempt(s) ended without a result ... if it
+  is a poison event it will dead-letter again") for the bare "gave up after " prefix, which a single kill or lease expiry on the last
+  attempt also writes. Both texts are constants in internal/app/deadletter.go, used by the worker and by admin.CrashedLastError, so
+  they cannot drift. A last_error starting "decode payload" gets a mild "will most likely fail the same way" warning.
+- Review follow-ups: (1) Replay sets Outcome=refused only after the refusal's audit insert and commit succeed, and the CLI prints the
+  report only when err is nil or ErrNotReplayable (replayReportable); tests TestReplayReportable and
+  TestDBReplayRefusalAuditFailureReportsNoOutcome (a trigger forces the audit insert to fail). On a commit error the commit may
+  still have succeeded: check `admin log <id>`. (2) the poison warning levels above. (3) setStatus now puts next_attempt_at an hour
+  ahead so the "claimable at once" check can fail. (4) the undo-guard read error goes through classify.
+- Lock order and deadlock reasoning (reasoning, not a test claim): Replay's only lock is the inbox row, FOR NO KEY UPDATE, taken by its
+  first data statement while it holds nothing else; everything after (the undo lookup, the UPDATE, the admin_actions insert whose FK takes
+  KEY SHARE on the row it already holds more strongly) needs no further lock that another transaction could hold while waiting for this
+  one. A transaction that waits at most once, and only before it holds anything, cannot be in a wait cycle. Against the others:
+  worker claim and fence take the same lock (FOR NO KEY UPDATE), so they are mutually exclusive with Replay: a claim SKIPs the row, a
+  fence waits (bounded by the short Replay transaction; Replay's wait is bounded by lock_timeout), and the fence's own token check
+  (attempts, replay_count) makes a claim taken before the replay lose afterwards. Preview takes only KEY SHARE on the inbox row, which
+  does not conflict with NO KEY UPDATE, so Replay and Preview never wait for each other; the preview's re-read of status and
+  replay_count turns a replay during a preview into ErrChanged. Admin undo (step 6) must follow the same rule: inbox row first.
+- Tests (DB): admin TestDBReplayResetsDeadRow (dead and stale; row fields, next_attempt_at not in the future, trimmed actor/reason,
+  audit detail matches the from_* values and generation = new replay_count), TestDBReplayRefuses (pending/done/skipped: ErrNotReplayable,
+  inbox/app/change_log tables unchanged, exactly one 'refused' audit row), TestDBReplayRefusesUndone (synthetic undo rows; control: a
+  refused undo does not block), TestDBReplayValidatesInput (snapshot of all tables unchanged), TestDBReplayNotFound (no audit),
+  TestDBReplayBusy (ErrBusy within the deadline, nothing written, works after unlock), TestDBReplayTwice (replay_count 2, two done rows
+  with generations 1 and 2), TestDBReplayConcurrentSecondIsRefused (first replay held inside its tx by the afterLock hook, second
+  verified waiting via pg_stat_activity, then refused as pending: proves the exclusive lock between replays), TestDBPreviewAfterReplay
+  UsesNewGeneration, TestDBPreviewDetectsRealReplay (real Replay committed during a preview -> ErrChanged naming generation 0 -> 1).
+  Unit: TestNormalizeReplayRequest, TestReplayValidatesBeforeDB (nil pool), TestFormatReplay, TestCrashedLastError, cmd/admin
+  TestParseArgs (replay cases) and TestRunUsageError (replay without -reason exits 2).
+  Worker: TestDBReplayedDeadEventApplies (dead on unknown customer -> customer arrives -> real Replay -> real worker applies; 2 change_log
+  rows in generation 1, seq 1..2; grant and balance exactly once), TestDBReplayedStaleEventIsStaleAgain (no new change_log rows,
+  subscription unchanged, replay_count 1). TestDBReplayFencesOldClaim and TestDBDeadLetterFencedByGeneration now use admin.Replay;
+  sim TestDBChangeLogCheckReplayedEventClean now uses admin.Replay too. replayRaw was deleted: admin.Replay produces every state those
+  tests need. markDead stays raw SQL (the real worker only reaches "dead" after maxAttempts, and the tests need it while a claim is
+  outstanding).
+- Mutations (each applied, the named test failed, reverted): keep last_error, keep attempts, no replay_count bump, audit generation off
+  by one -> ResetsDeadRow; allow-list widened to done / pending / skipped (three runs) and refusal audit not committed -> Refuses; undone
+  guard removed, and guard counting refused undos -> RefusesUndone; validation removed -> ValidatesInput; no lock_timeout -> Busy
+  (57014 instead of ErrBusy); inbox lock weakened to FOR KEY SHARE -> ConcurrentSecondIsRefused (-count=3).
+- dev.ps1 unchanged: the db-test list already includes ./internal/admin.
+- Review round 2 nits (lead): the decode-failure text is now app.DecodePayloadPrefix, shared by the worker and the replay warning
+  (same bytes as before); the FormatReplay doc lists all warning levels; TestDBReplayRefusalAuditFailureReportsNoOutcome drops any
+  leftover trigger/function first and registers its cleanup before creating them.
+- Regression (experiment-runner, 2026-11-12, uncommitted tree = not evidence, outputs in scratchpad only) on the final 5b build:
+  crash smoke seeds 1-3 (-dup 0.2 -reorder 10 -crash-rate 0.1 -kill-interval 2s -lease 1s, changelog check on): 0 violations;
+  poison smoke seeds 1-2 (+ -poison 2): 0 violations, dead=2 per seed; compatibility smoke, seed 1 with bin/worker-phase4.exe
+  against 00005 (-changelog-check=false): 0 violations.
+
 ## Later steps (NOT now): 6 undo, 7 evidence.
 Constraints: cmd/naive unchanged; every behaviour change tested; each step its own commit (lead commits after user approval).

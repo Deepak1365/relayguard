@@ -1,6 +1,7 @@
 // Package admin holds operator tools on top of the inbox and change_log:
-// preview (what would applying this event change?) and log (what did it
-// change?). Replay and undo come in later steps.
+// preview (what would applying this event change?), log (what did it
+// change?) and replay (audited: run a dead or stale event again). Undo comes
+// in a later step.
 package admin
 
 import (
@@ -32,9 +33,9 @@ var (
 	ErrChanged = errors.New("event changed during the preview; run it again")
 )
 
-// Options bounds how long a preview may wait or run. Zero values use the
-// defaults. Short limits matter because a preview takes the same row locks
-// as a real apply: it must never hold up the worker for long.
+// Options bounds how long a preview or replay may wait or run. Zero values
+// use the defaults. Short limits matter because both take row locks the
+// worker also needs: they must never hold up the worker for long.
 type Options struct {
 	LockTimeout      time.Duration // default 2s
 	StatementTimeout time.Duration // default 5s
@@ -44,6 +45,9 @@ type Options struct {
 	// lets a test commit a concurrent change at the one point the re-read
 	// exists to catch.
 	beforeReread func()
+	// afterLock, if set, runs in Replay right after the inbox row is locked
+	// and read. Test hook only, for the concurrent-replay test.
+	afterLock func()
 }
 
 func (o Options) withDefaults() Options {

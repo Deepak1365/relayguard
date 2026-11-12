@@ -26,7 +26,7 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
   - [x] Step 4: preview (internal/admin, cmd/admin preview/log; inbox-first KEY SHARE lock avoids a worker deadlock)
   - [x] Step 5a: migration 00005 (replay_count, CHECKs), fence token (replay_count, attempts), claim/fence FOR NO KEY UPDATE, generation-aware checker
         (review fixes: preview re-reads status+replay_count at the end and after a failed apply -> ErrChanged)
-  - [ ] Step 5b: admin replay (dead/stale only, audited, -actor/-reason required, undone guard)
+  - [x] Step 5b: admin replay (dead/stale only, audited, -actor/-reason required, undone guard)
   - [ ] Step 6: undo with conflict explanations
   - [ ] Step 7: evidence runs from a clean tree, docs/phase6-results.md, decision records
 

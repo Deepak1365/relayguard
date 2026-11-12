@@ -95,6 +95,79 @@ admin_actions: 0 row(s)
 	}
 }
 
+func TestFormatReplay(t *testing.T) {
+	ts := time.Date(2026, 11, 12, 10, 30, 0, 0, time.FixedZone("CET", 3600))
+	done := ReplayResult{InboxID: 7, EventID: "evt_1", EventType: "invoice.paid", Outcome: ReplayDone, ActionID: 3,
+		FromStatus: "dead", FromAttempts: 8, FromLastError: "unknown customer cus_x", FromProcessedAt: &ts, Generation: 1}
+	poison := done
+	poison.EventType, poison.Generation = "test.poison", 2
+	poison.FromLastError = "gave up after 8 attempts; last error: none recorded (the worker crashed or was killed while processing)"
+	possible := poison
+	possible.EventType = "invoice.paid"
+	possible.FromLastError = "gave up after 8 attempts; last error: unknown customer cus_x"
+	decode := done
+	decode.FromLastError = "decode payload: unexpected end of JSON input"
+	refused := ReplayResult{InboxID: 7, EventID: "evt_1", EventType: "invoice.paid", Outcome: ReplayRefused, ActionID: 4,
+		FromStatus: "done", FromAttempts: 1, Generation: 0, Reason: "status done is not replayable (only dead and stale)"}
+
+	cases := []struct {
+		name string
+		r    ReplayResult
+		want string
+	}{
+		{"done", done, `REPLAY inbox 7 (evt_1, invoice.paid): done, audit action #3
+was: status dead, attempts 8, processed_at 2026-11-12 09:30:00Z, generation 0
+was last_error: unknown customer cus_x
+now: status pending, attempts 0, generation 1; the worker will pick it up
+`},
+		{"poison warning", poison, `REPLAY inbox 7 (evt_1, test.poison): done, audit action #3
+was: status dead, attempts 8, processed_at 2026-11-12 09:30:00Z, generation 1
+was last_error: gave up after 8 attempts; last error: none recorded (the worker crashed or was killed while processing)
+now: status pending, attempts 0, generation 2; the worker will pick it up
+warning: the last error says the worker crashed on this event (possible poison event); the replay will likely crash it again and dead-letter it after the full attempt budget
+`},
+		{"possible poison warning", possible, `REPLAY inbox 7 (evt_1, invoice.paid): done, audit action #3
+was: status dead, attempts 8, processed_at 2026-11-12 09:30:00Z, generation 1
+was last_error: gave up after 8 attempts; last error: unknown customer cus_x
+now: status pending, attempts 0, generation 2; the worker will pick it up
+warning: the final attempt(s) ended without a result (crash, kill or lease expiry); if it is a poison event it will dead-letter again
+`},
+		{"decode warning", decode, `REPLAY inbox 7 (evt_1, invoice.paid): done, audit action #3
+was: status dead, attempts 8, processed_at 2026-11-12 09:30:00Z, generation 0
+was last_error: decode payload: unexpected end of JSON input
+now: status pending, attempts 0, generation 1; the worker will pick it up
+warning: the last error is a payload decode failure; a replay will most likely fail the same way
+`},
+		{"refused", refused, `REPLAY inbox 7 (evt_1, invoice.paid): refused, audit action #4
+was: status done, attempts 1, processed_at none, generation 0
+refused: status done is not replayable (only dead and stale) (nothing changed; the refusal is audited)
+`},
+	}
+	for _, c := range cases {
+		if got := FormatReplay(c.r); got != c.want {
+			t.Errorf("%s:\n got:\n%s\nwant:\n%s", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCrashedLastError(t *testing.T) {
+	for _, c := range []struct {
+		lastErr string
+		want    CrashSign
+	}{
+		{"gave up after 8 attempts; last error: none recorded (the worker crashed or was killed while processing)", CrashLikely},
+		{"gave up after 8 attempts; last error: unknown customer cus_x", CrashPossible}, // one kill on the last attempt
+		{"gave up after 8 attempts", CrashPossible},
+		{"unknown customer cus_x", CrashNone}, // normal dead path
+		{"the worker crashed", CrashNone},     // text alone, without the worker's prefix, proves nothing
+		{"", CrashNone},
+	} {
+		if got := CrashedLastError(c.lastErr); got != c.want {
+			t.Errorf("CrashedLastError(%q) = %v, want %v", c.lastErr, got, c.want)
+		}
+	}
+}
+
 // The preview's whole safety argument is "always rolled back". Guard it at
 // the source level too, so a later edit cannot add a Commit unnoticed
 // (TestDBPreviewWritesNothing is the behavioural check).

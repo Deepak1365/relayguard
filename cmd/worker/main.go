@@ -165,10 +165,9 @@ func (w *worker) deadLetterCrashed(ctx context.Context, id int64, tok claimToken
 	tag, err := w.pool.Exec(ctx, `
 		UPDATE inbox
 		SET status = 'dead', attempts = $2, processed_at = now(),
-		    last_error = format('gave up after %s attempts; last error: %s', $2::int,
-		        COALESCE(last_error, 'none recorded (the worker crashed or was killed while processing)'))
+		    last_error = $5::text || format('%s attempts; last error: %s', $2::int, COALESCE(last_error, $6::text))
 		WHERE id = $1 AND status = 'pending' AND attempts = $3 AND replay_count = $4`,
-		id, maxAttempts, tok.attempts, tok.generation)
+		id, maxAttempts, tok.attempts, tok.generation, app.GaveUpPrefix, app.NoResultRecorded)
 	if err != nil {
 		return false, fmt.Errorf("dead-letter: %w", err)
 	}
@@ -242,7 +241,7 @@ func (w *worker) process(ctx context.Context, id int64, tok claimToken) error {
 
 	var evt stripeevent.Event
 	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
-		return finish(ctx, tx, id, "dead", fmt.Sprintf("decode payload: %v", err))
+		return finish(ctx, tx, id, "dead", app.DecodePayloadPrefix+err.Error())
 	}
 	if fault.PoisonEnabled() && evt.Type == fault.PoisonType {
 		log.Printf("POISON: %s crashes the worker (attempt %d)", evt.ID, tok.attempts)

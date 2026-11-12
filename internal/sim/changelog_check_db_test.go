@@ -500,7 +500,7 @@ func TestDBChangeLogCheckCountsCurrentGenerationOnly(t *testing.T) {
 
 // The realistic path: an invoice that arrived before its customer is dead
 // (no rows), and a stale subscription event (no rows); both are replayed
-// (raw SQL until admin.Replay exists in step 5b) and applied again. The
+// (with the real admin.Replay) and applied again. The
 // invoice now applies under generation 1, the stale event is stale again.
 // The whole history must check clean, and the invoice's rows must really be
 // in generation 1 (otherwise "clean" could just mean "not looked at").
@@ -518,10 +518,12 @@ func TestDBChangeLogCheckReplayedEventClean(t *testing.T) {
 	}
 	wantViolations(t, check(t, pool, "a")) // dead with no rows is clean
 
-	replay := `UPDATE inbox SET status = 'pending', attempts = 0, last_error = NULL, processed_at = NULL,
-		next_attempt_at = now(), replay_count = replay_count + 1 WHERE id = $1`
-	mustExec(t, pool, replay, early)
-	mustExec(t, pool, replay, f.stale)
+	for _, id := range []int64{early, f.stale} {
+		res, err := admin.Replay(ctx, pool, admin.ReplayRequest{InboxID: id, Actor: "dbtest", Reason: "checker test"}, admin.Options{})
+		if err != nil || res.Outcome != admin.ReplayDone {
+			t.Fatalf("replay %d: %+v, %v", id, res, err)
+		}
+	}
 	if got := dbtest.ApplyInbox(t, pool, early); got != "done" {
 		t.Fatalf("replayed invoice: %s, want done", got)
 	}
