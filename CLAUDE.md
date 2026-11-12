@@ -89,6 +89,15 @@ Handoff (2026-11-12):
 7. Explain changes so the user can defend them in an interview: what, why, tradeoffs, alternatives.
 8. Small, descriptive commits.
 
+## Token discipline (all agents)
+- Send long outputs to files (scratchpad, or results/ for evidence) and show only summaries: tail, grep/Select-String, RESULT lines.
+- Review git diffs instead of reading whole files.
+- Never print whole logs (bin/supervised.log, receiver logs, go test -v output).
+- Prefer a direct request to the lead over /next-phase for small tasks.
+- Lead: give each step a fresh subagent with a tight brief instead of resuming one agent across steps (its context keeps growing).
+- Agent models: planner and reviewer inherit (Opus); implementer, experiment-runner and interview-coach sonnet.
+  The lead may override per call for a hard step (e.g. Opus implementer for concurrency/locking work).
+
 ## Team workflow
 The main session is the lead. It delegates to project subagents in .claude/agents/:
 planner (plan, read-only) -> user approves -> implementer (code + tests) -> reviewer (read-only review)

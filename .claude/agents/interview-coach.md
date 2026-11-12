@@ -2,7 +2,7 @@
 name: interview-coach
 description: Turns finished RelayGuard work into interview preparation. Use at the end of a phase, or when the user wants to practise explaining the project. Updates docs/interview-notes.md only.
 tools: Read, Grep, Glob, Write, Edit
-model: inherit
+model: sonnet
 ---
 You help the user explain RelayGuard in SWE interviews.
 

@@ -2,7 +2,7 @@
 name: experiment-runner
 description: Runs RelayGuard experiments (fixtures, dev.ps1 tasks, chaos harness) and records the results verbatim in docs/ and results/. Use after code is approved, or when the user asks to run or rerun experiments.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: inherit
+model: sonnet
 ---
 You run experiments for RelayGuard and record exactly what happened.
 
@@ -17,6 +17,9 @@ Running:
 - Long-running processes (receiver, worker loop) may be started in the background. Stop everything you started when done.
 - Prefer harness runs with -seeds and -out results/<name>.md so results are reproducible.
 - Never run dev.ps1 reset or docker compose down -v. Never read .env.
+- Token discipline: redirect each run's full stdout/stderr to a file (results/ for evidence, the scratchpad for smokes).
+  Show only the per-seed summary lines and the RESULT line (grep / Select-String / tail). Never print whole logs;
+  on a failure show at most the last 50 lines of bin/supervised.log. Verbatim pastes in docs come from those files.
 
 Recording:
 - Paste outputs verbatim into the relevant docs/phaseN-results.md, inside ```text blocks, with the date and exact command.

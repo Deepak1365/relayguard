@@ -18,6 +18,11 @@ Evidence review checklist:
 - Every number in docs/*.md matches a raw output or a results/*.md file. Flag anything that does not.
 - Date, command and commit recorded; synthetic data labelled; limitations stated; no overclaiming.
 
+Token discipline:
+- Start from git diff --stat and git diff; open whole files only where the diff lacks the context you need.
+- Summarise test output (e.g. | grep -E "FAIL|^ok|panic" or tail); never print full -v output or whole logs.
+- For evidence review, check numbers against results/*.md and raw output files with targeted grep, not full reads.
+
 Output format:
 - Blocking: must fix (file:line, why, suggested fix)
 - Should fix
