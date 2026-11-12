@@ -24,14 +24,6 @@ import (
 	"github.com/Deepak1365/relayguard/internal/fault"
 )
 
-func invoiceObject(id, customer string, amountPaid int64) map[string]any {
-	return map[string]any{"id": id, "object": "invoice", "customer": customer, "amount_paid": amountPaid}
-}
-
-func subscriptionObject(id, customer, status string) map[string]any {
-	return map[string]any{"id": id, "object": "subscription", "customer": customer, "status": status}
-}
-
 // processN runs processOne n times and fails if any call found nothing or
 // returned an error.
 func processN(t *testing.T, w *worker, n int) {
@@ -107,11 +99,11 @@ const (
 func TestDBApplyWritesChangeLog(t *testing.T) {
 	pool := dbtest.Pool(t)
 	cus := dbtest.InsertEvent(t, pool, "cl_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_cl"))
-	inv := dbtest.InsertEvent(t, pool, "cl_inv", "invoice.paid", invoiceObject("in_dbtest_cl", "cus_dbtest_cl", 2000))
+	inv := dbtest.InsertEvent(t, pool, "cl_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_cl", "cus_dbtest_cl", 2000))
 	subC := dbtest.InsertEventAt(t, pool, "cl_sub_c", "customer.subscription.created", dbtest.DefaultCreated,
-		subscriptionObject("sub_dbtest_cl", "cus_dbtest_cl", "active"))
+		dbtest.SubscriptionObject("sub_dbtest_cl", "cus_dbtest_cl", "active"))
 	subU := dbtest.InsertEventAt(t, pool, "cl_sub_u", "customer.subscription.updated", dbtest.DefaultCreated+10,
-		subscriptionObject("sub_dbtest_cl", "cus_dbtest_cl", "past_due"))
+		dbtest.SubscriptionObject("sub_dbtest_cl", "cus_dbtest_cl", "past_due"))
 	processN(t, newTestWorker(pool), 4)
 	for _, id := range []int64{cus, inv, subC, subU} {
 		wantStatus(t, pool, id, "done")
@@ -182,7 +174,7 @@ func TestDBApplyWritesChangeLog(t *testing.T) {
 func TestDBZeroCreditInvoiceLogsUpdate(t *testing.T) {
 	pool := dbtest.Pool(t)
 	dbtest.InsertEvent(t, pool, "zero_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_zero"))
-	inv := dbtest.InsertEvent(t, pool, "zero_inv", "invoice.paid", invoiceObject("in_dbtest_zero", "cus_dbtest_zero", 50))
+	inv := dbtest.InsertEvent(t, pool, "zero_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_zero", "cus_dbtest_zero", 50))
 	processN(t, newTestWorker(pool), 2)
 	wantStatus(t, pool, inv, "done")
 
@@ -216,9 +208,9 @@ func TestDBStaleAndSkippedWriteNoChangeLog(t *testing.T) {
 	pool := dbtest.Pool(t)
 	dbtest.InsertEvent(t, pool, "st_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_st"))
 	newer := dbtest.InsertEventAt(t, pool, "st_sub_new", "customer.subscription.updated", dbtest.DefaultCreated+10,
-		subscriptionObject("sub_dbtest_st", "cus_dbtest_st", "past_due"))
+		dbtest.SubscriptionObject("sub_dbtest_st", "cus_dbtest_st", "past_due"))
 	older := dbtest.InsertEventAt(t, pool, "st_sub_old", "customer.subscription.created", dbtest.DefaultCreated,
-		subscriptionObject("sub_dbtest_st", "cus_dbtest_st", "active"))
+		dbtest.SubscriptionObject("sub_dbtest_st", "cus_dbtest_st", "active"))
 	skipped := dbtest.InsertEvent(t, pool, "st_skip", "charge.refunded", map[string]any{"id": "ch_dbtest_st"})
 	processN(t, newTestWorker(pool), 4)
 
@@ -257,7 +249,7 @@ func TestDBApplyErrorAfterWriteRollsBackChangeLog(t *testing.T) {
 	w := newTestWorker(pool)
 	dbtest.InsertEvent(t, pool, "err_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_err"))
 	processN(t, w, 1)
-	inv := dbtest.InsertEvent(t, pool, "err_inv", "invoice.paid", invoiceObject("in_dbtest_err", "cus_dbtest_err", 2000))
+	inv := dbtest.InsertEvent(t, pool, "err_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_err", "cus_dbtest_err", 2000))
 
 	// Sequences are not transactional: another session sees nextval at once.
 	// change_log_id_seq at 2 inside the hook proves the grant's log row was
@@ -325,7 +317,7 @@ func TestDBCrashMidApplyLeavesNoChangeLog(t *testing.T) {
 	ctx := context.Background()
 	dbtest.InsertEvent(t, pool, "crash_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_crash"))
 	processN(t, newTestWorker(pool), 1)
-	inv := dbtest.InsertEvent(t, pool, "crash_inv", "invoice.paid", invoiceObject("in_dbtest_crash", "cus_dbtest_crash", 2000))
+	inv := dbtest.InsertEvent(t, pool, "crash_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_crash", "cus_dbtest_crash", 2000))
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestDBCrashMidApplyLeavesNoChangeLog$", "-test.count=1", "-test.v")
 	cmd.Env = append(os.Environ(), crashChildEnv+"=1")
@@ -394,7 +386,7 @@ func TestDBCustomerLockAllowsConcurrentGrant(t *testing.T) {
 	w := newTestWorker(pool)
 	dbtest.InsertEvent(t, pool, "kshare_cus", "customer.created", dbtest.CustomerObject("cus_dbtest_kshare"))
 	processN(t, w, 1)
-	inv := dbtest.InsertEvent(t, pool, "kshare_inv", "invoice.paid", invoiceObject("in_dbtest_kshare", "cus_dbtest_kshare", 2000))
+	inv := dbtest.InsertEvent(t, pool, "kshare_inv", "invoice.paid", dbtest.InvoiceObject("in_dbtest_kshare", "cus_dbtest_kshare", 2000))
 
 	other, err := pool.Begin(ctx)
 	if err != nil {

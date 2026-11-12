@@ -125,5 +125,69 @@ As implemented (deviations accepted by the lead/reviewer, 2026-11-12):
 - Step 5 follow-up: the count check counts all generations together; with replay it must count the current generation only.
 - jsonb_populate_record ignores extra keys and turns missing keys into NULL: a future migration that adds a column must backfill change_log images or teach the checker the column (comment in internal/sim/changelog_check.go).
 
-## Later steps (NOT now): 4 preview, 5 migration 00005 + replay fence (attempts, replay_count) + replay, 6 undo, 7 evidence.
+## Steps 4, 5a, 5b (approved by the user 2026-11-12, all defaults)
+User answers: Q1 -actor and -reason both required, no default. Q2 skipped is NOT replayable (dead/stale only).
+Q3 step 5 split into 5a and 5b (separate commits). Q4 lock-mode switch stays in 5a. Q5 add the undone guard now (synthetic test).
+Commits: step 4, then 5a, then 5b. The user pre-approved commit+push of step 4; 5a and 5b stop at checkpoint B.
+
+### Step 4: preview (no migration)
+- internal/admin/preview.go: Preview(ctx, pool, inboxID, Options{LockTimeout, StatementTimeout}) (PreviewResult, error).
+  Runs the REAL app.Apply with changelog.NewApply(id, generation) in a READ COMMITTED tx that is always rolled back
+  (defer tx.Rollback; no Commit anywhere in the file). SET LOCAL lock_timeout '2s', statement_timeout '5s' (Options for tests).
+  Before rollback: read back change_log rows (inbox_id, generation, source='apply' ORDER BY seq) as the result; re-read inbox status.
+  Errors: ErrNotFound, ErrNotPreviewable (done -> "use log <id>"), ErrBusy (55P03), ErrChanged (status changed during preview, or 23505 on change_log_apply_once).
+  Status: pending/dead/stale/skipped previewable; done refused. Outcomes: apply (N changes), stale, skip, error (e.g. unknown customer, errConcurrentInsert).
+  generation = 0 in step 4 (5a switches to inbox.replay_count). Output notes ids of inserted rows are provisional.
+- internal/admin/log.go: Log(ctx, pool, id): all change_log rows (gen, source columns) + admin_actions rows.
+- internal/admin/format.go: FormatPreview, FormatLog (pure, unit tested). Lines via changelog.Format.
+- cmd/admin/main.go: `admin preview <id>`, `admin log <id>`; config via config.LoadDotEnv(".env") like the worker (never print it).
+  Exit 0 when a preview completes (any outcome), non-zero for refused/busy/error.
+- internal/dbtest: move invoiceObject/subscriptionObject (cmd/worker tests) and applyInbox (sim tests, as ApplyInbox) here.
+- dev.ps1: build also builds bin\admin.exe; db-test adds ./internal/admin/. No dev.ps1 admin task (positional [int]$Count can't carry flags).
+- Tests: admin TestFormatPreview/TestFormatLog; cmd/admin TestParseArgs; admin TestDBPreviewWritesNothing (jsonb_agg snapshot of
+  customers, credit_grants, subscriptions, change_log, admin_actions, inbox identical before/after; mutation Rollback->Commit fails it);
+  cmd/worker TestDBPreviewMatchesRealApply (same seq/table/op; update images equal incl row_version; inserts equal minus id/created_at/updated_at;
+  mutation drop last row fails it); admin TestDBPreviewOutcomes (stale, skip, dead unknown-customer -> error then apply after customer.created, not found);
+  admin TestDBPreviewRefusesDone (mutation remove check fails it); admin TestDBPreviewLockTimeout (other tx holds FOR NO KEY UPDATE on customer,
+  200ms -> ErrBusy within 5s ctx; mutation remove lock_timeout fails it); sim TestDBChangeLogCheckAfterPreviews (preview every history() event
+  before applying; 0 violations AND max(change_log.id) > count(*), proving gaps exist).
+- Interim cost until 5a: the worker fence/claim still use FOR UPDATE, which conflicts with the preview's FK KEY SHARE on inbox (ms).
+
+As implemented (reviewer should-fixes, 2026-11-12):
+- Inbox-first lock: Preview reads the inbox row with FOR KEY SHARE before anything else (under lock_timeout). Without it, a preview of an event the worker has fenced could hold an uncommitted customer row (or a subscription pre-read lock) and then wait on the fence for its change_log FK while the worker waits on that row: 40P01, possibly aborting the worker. Test TestDBPreviewWaitsForFenceWithoutDeadlock (mutation without the lock: deadlock detected). Still harmless after 5a (fence FOR NO KEY UPDATE does not conflict with KEY SHARE).
+- Error split is an allow-list: only app.ErrUnknownCustomer, app.ErrConcurrentInsert (exported for this) and JSON decode errors are OutcomeError (exit 0); everything else (timeouts, deadlocks, other constraint violations such as a duplicate customer, cancellation) is an error (exit 1). TestIsBusinessError, TestDBPreviewUnlistedFailureIsAnError.
+- ErrChanged via change_log_apply_once: TestDBPreviewDetectsConcurrentApply.
+- TestDBPreviewMatchesRealApply also ignores updated_at in subscription UPDATE after-images (the upsert sets now()); everything else in update images, row_version included, must match.
+- Extras: TestPreviewSourceHasNoCommit (source guard), TestDBLog, TestRunUsageError; dev.ps1 build stops at the first failing binary. On success the preview's savepoint is left open so the deferred tx.Rollback is the single, tested discard point.
+
+### Step 5a: migration 00005, replay fence, lock mode, generation-aware checker
+- migrations/00005_replay.sql: inbox.replay_count INTEGER NOT NULL DEFAULT 0 CHECK (>= 0); change_log CHECK (generation >= 0), CHECK (seq >= 1). Down drops them.
+- Fence token (replay_count, attempts): replay resets attempts, so attempts alone has an ABA problem.
+- Worker claim CTE: FOR NO KEY UPDATE SKIP LOCKED; fence: FOR NO KEY UPDATE (resolves the step-2 lock hazard; still mutually exclusive).
+  claim RETURNING attempts, replay_count -> claimToken{attempts, generation}; fence adds AND replay_count=$3; deadLetterCrashed adds AND replay_count=$4;
+  changelog.NewApply(id, tok.generation). admin.Preview and dbtest.ApplyInbox use replay_count.
+- Generation meaning: change_log.generation = inbox.replay_count at the fence. Older generations are always empty (replay only starts
+  from dead/stale, which have 0 apply rows). Undo rows (step 6) take the generation of the apply they revert.
+- Checker: checkApplyCounts joins on cl.generation = i.replay_count; apply rows with generation <> replay_count -> changelog_unexpected.
+  Chain/final/attribution unchanged.
+- Tests: dbtest TestDBSchemaReplay; worker TestDBKeyShareDoesNotBlockClaimOrFence (mutations: claim/fence back to FOR UPDATE);
+  TestDBFenceLockBlocksReclaimMidApply; TestDBReplayFencesOldClaim (raw SQL replay in 5a; mutation drop replay_count from fence);
+  TestDBDeadLetterFencedByGeneration; sim TestDBChangeLogCheckCountsCurrentGenerationOnly (synthetic); TestDBChangeLogCheckReplayedEventClean.
+- Regression adds a poison smoke: chaos seeds 1-2 -poison 2 (with crash/dup/reorder/lease 1s).
+
+### Step 5b: replay (audited)
+- admin.Replay(ctx, pool, ReplayRequest{InboxID, Actor, Reason}, Options) (ReplayResult, error). Only dead and stale; refuse done, pending,
+  skipped, and any event with an admin_actions undo/done row (guard; undo arrives in step 6).
+- Tx: lock_timeout 2s; SELECT inbox FOR NO KEY UPDATE; undone guard; refuse -> audit row outcome 'refused' then ErrNotReplayable;
+  accept -> UPDATE status='pending', attempts=0, last_error=NULL, processed_at=NULL, next_attempt_at=now(), replay_count+1, audit 'done'
+  with detail {from_status, from_attempts, from_last_error, from_processed_at, generation}. Busy -> ErrBusy, nothing written. Unknown id -> ErrNotFound, no audit.
+- Input: actor and reason trimmed, non-empty, <= 200 / 1000 chars. CLI: admin replay <id> -actor <name> -reason "<text>"; warn when last_error says crashed (poison).
+- Tests: TestDBReplayResetsDeadRow (mutation keep last_error fails it), TestDBReplayRefuses (pending/done/skipped; mutation widen allow-list),
+  TestDBReplayRefusesUndone (synthetic; mutation remove guard), TestDBReplayValidatesInput, TestDBReplayBusy, TestDBReplayTwice,
+  worker TestDBReplayedDeadEventApplies, TestDBReplayedStaleEventIsStaleAgain, TestDBReplayFencesOldClaim switched to admin.Replay.
+- Optional compatibility smoke: 1 seed with bin/worker-phase4.exe -changelog-check=false against 00005.
+- 00004 notes: admin_actions has no generation column (kept in detail JSON); outcome only done/refused (busy writes nothing);
+  inbox status has no 'undone' (step 6 needs 00006 if it wants one).
+
+## Later steps (NOT now): 6 undo, 7 evidence.
 Constraints: cmd/naive unchanged; every behaviour change tested; each step its own commit (lead commits after user approval).

@@ -32,8 +32,8 @@ func TestClassifyUpsert(t *testing.T) {
 				c.found, c.returned, c.inserted, op, err, c.wantOp, c.wantErr)
 		}
 	}
-	if _, err := classifyUpsert(false, true, false); !errors.Is(err, errConcurrentInsert) {
-		t.Errorf("race branch error = %v, want errConcurrentInsert (a retryable apply error)", err)
+	if _, err := classifyUpsert(false, true, false); !errors.Is(err, ErrConcurrentInsert) {
+		t.Errorf("race branch error = %v, want ErrConcurrentInsert (a retryable apply error)", err)
 	}
 }
 

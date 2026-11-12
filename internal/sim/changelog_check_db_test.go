@@ -12,8 +12,6 @@ package sim
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,10 +19,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/Deepak1365/relayguard/internal/app"
+	"github.com/Deepak1365/relayguard/internal/admin"
 	"github.com/Deepak1365/relayguard/internal/changelog"
 	"github.com/Deepak1365/relayguard/internal/dbtest"
-	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
 func testScope(tag string) changeLogScope {
@@ -33,59 +30,6 @@ func testScope(tag string) changeLogScope {
 		customers:     "cus_dbtest_" + tag + "_",
 		subscriptions: "sub_dbtest_" + tag + "_",
 	}
-}
-
-// applyInbox processes one inbox row the way cmd/worker does (fence-free:
-// these tests run single-threaded): app.Apply with a fresh recorder inside a
-// savepoint, then mark the row done / stale / skipped. Any other apply error
-// fails the test. Kept minimal on purpose; the worker's own DB tests cover
-// claim, lease and retry.
-func applyInbox(t *testing.T, pool *pgxpool.Pool, inboxID int64) string {
-	t.Helper()
-	ctx := context.Background()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback(ctx)
-	var payload string
-	if err := tx.QueryRow(ctx, `SELECT payload::text FROM inbox WHERE id = $1 FOR UPDATE`, inboxID).Scan(&payload); err != nil {
-		t.Fatalf("read inbox %d: %v", inboxID, err)
-	}
-	var evt stripeevent.Event
-	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
-		t.Fatal(err)
-	}
-	sp, err := tx.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	status := "done"
-	switch err := app.Apply(ctx, sp, changelog.NewApply(inboxID, 0), evt, app.Hooks{}); {
-	case err == nil:
-		if err := sp.Commit(ctx); err != nil {
-			t.Fatal(err)
-		}
-	case errors.Is(err, app.ErrStale):
-		status = "stale"
-	case errors.Is(err, app.ErrUnhandledType):
-		status = "skipped"
-	default:
-		t.Fatalf("apply %s: %v", evt.ID, err)
-	}
-	if status != "done" {
-		if err := sp.Rollback(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE inbox SET status = $2, attempts = 1, processed_at = now() WHERE id = $1`,
-		inboxID, status); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	return status
 }
 
 // fixture is one small history in its own scope.
@@ -100,6 +44,13 @@ type fixture struct {
 // and an unhandled type (skipped). Expected change_log: 1+2+1+1+0+0 rows.
 func history(t *testing.T, pool *pgxpool.Pool, tag string) fixture {
 	t.Helper()
+	return buildHistory(t, pool, tag, false)
+}
+
+// buildHistory is history; with previewFirst it runs admin.Preview on each
+// event just before applying it.
+func buildHistory(t *testing.T, pool *pgxpool.Pool, tag string, previewFirst bool) fixture {
+	t.Helper()
 	f := fixture{customer: "cus_dbtest_" + tag + "_1", sub: "sub_dbtest_" + tag + "_1"}
 	T := dbtest.DefaultCreated
 	sub := func(status string) map[string]any {
@@ -113,7 +64,7 @@ func history(t *testing.T, pool *pgxpool.Pool, tag string) fixture {
 		id          *int64
 	}{
 		{"cus", "customer.created", T, dbtest.CustomerObject(f.customer), "done", nil},
-		{"inv", "invoice.paid", T, invoiceObj("in_dbtest_"+tag+"_1", f.customer, 2000), "done", &f.invoice},
+		{"inv", "invoice.paid", T, dbtest.InvoiceObject("in_dbtest_"+tag+"_1", f.customer, 2000), "done", &f.invoice},
 		{"sub_c", "customer.subscription.created", T + 1, sub("active"), "done", nil},
 		{"sub_u", "customer.subscription.updated", T + 3, sub("past_due"), "done", nil},
 		{"sub_old", "customer.subscription.updated", T + 2, sub("active"), "stale", &f.stale},
@@ -121,7 +72,12 @@ func history(t *testing.T, pool *pgxpool.Pool, tag string) fixture {
 	}
 	for _, s := range steps {
 		id := dbtest.InsertEventAt(t, pool, tag+"_"+s.suffix, s.typ, s.created, s.object)
-		if got := applyInbox(t, pool, id); got != s.want {
+		if previewFirst {
+			if _, err := admin.Preview(context.Background(), pool, id, admin.Options{}); err != nil {
+				t.Fatalf("preview %s: %v", s.suffix, err)
+			}
+		}
+		if got := dbtest.ApplyInbox(t, pool, id); got != s.want {
 			t.Fatalf("%s: status %s, want %s", s.suffix, got, s.want)
 		}
 		if s.id != nil {
@@ -136,10 +92,6 @@ func history(t *testing.T, pool *pgxpool.Pool, tag string) fixture {
 		t.Fatal(err)
 	}
 	return f
-}
-
-func invoiceObj(id, customer string, amountPaid int64) map[string]any {
-	return map[string]any{"id": id, "object": "invoice", "customer": customer, "amount_paid": amountPaid}
 }
 
 func check(t *testing.T, pool *pgxpool.Pool, tag string) []Violation {
@@ -200,8 +152,8 @@ func TestDBChangeLogCheckDetectsUnloggedWrite(t *testing.T) {
 	f := history(t, pool, "a")
 
 	mustExec(t, pool, `UPDATE customers SET credit_balance = credit_balance + 1 WHERE id = $1`, f.customerRow)
-	inv2 := dbtest.InsertEvent(t, pool, "a_inv2", "invoice.paid", invoiceObj("in_dbtest_a_2", f.customer, 1000))
-	if got := applyInbox(t, pool, inv2); got != "done" {
+	inv2 := dbtest.InsertEvent(t, pool, "a_inv2", "invoice.paid", dbtest.InvoiceObject("in_dbtest_a_2", f.customer, 1000))
+	if got := dbtest.ApplyInbox(t, pool, inv2); got != "done" {
 		t.Fatalf("second invoice: %s", got)
 	}
 	mustExec(t, pool, `UPDATE subscriptions SET status = 'canceled' WHERE id = $1`, f.subRow)
@@ -341,8 +293,8 @@ func TestDBChangeLogCheckIgnoresOtherScopes(t *testing.T) {
 func TestDBChangeLogCheckDetectsSwappedEvents(t *testing.T) {
 	pool := dbtest.Pool(t)
 	f := history(t, pool, "a")
-	inv2 := dbtest.InsertEvent(t, pool, "a_inv2", "invoice.paid", invoiceObj("in_dbtest_a_2", f.customer, 1000))
-	if got := applyInbox(t, pool, inv2); got != "done" {
+	inv2 := dbtest.InsertEvent(t, pool, "a_inv2", "invoice.paid", dbtest.InvoiceObject("in_dbtest_a_2", f.customer, 1000))
+	if got := dbtest.ApplyInbox(t, pool, inv2); got != "done" {
 		t.Fatalf("second invoice: %s", got)
 	}
 	wantViolations(t, check(t, pool, "a")) // clean before the swap
@@ -471,12 +423,12 @@ func TestDBChangeLogCheckRounding(t *testing.T) {
 		suffix string
 		object map[string]any
 	}{
-		{"a_inv_50", invoiceObj("in_dbtest_a_50", f.customer, 50)},
-		{"a_inv_2050", invoiceObj("in_dbtest_a_2050", f.customer, 2050)},
+		{"a_inv_50", dbtest.InvoiceObject("in_dbtest_a_50", f.customer, 50)},
+		{"a_inv_2050", dbtest.InvoiceObject("in_dbtest_a_2050", f.customer, 2050)},
 		{"a_inv_none", map[string]any{"id": "in_dbtest_a_none", "object": "invoice", "customer": f.customer}},
 	} {
 		id := dbtest.InsertEvent(t, pool, inv.suffix, "invoice.paid", inv.object)
-		if got := applyInbox(t, pool, id); got != "done" {
+		if got := dbtest.ApplyInbox(t, pool, id); got != "done" {
 			t.Fatalf("%s: status %s", inv.suffix, got)
 		}
 	}
@@ -498,5 +450,23 @@ func TestDBChangeLogCheckRounding(t *testing.T) {
 	// Sorted by invoice id: in_dbtest_a_2050, in_dbtest_a_50, in_dbtest_a_none.
 	if fmt.Sprint(amounts) != "[20 0 0]" {
 		t.Fatalf("grant amounts %v, want [20 0 0] (the app's truncation)", amounts)
+	}
+}
+
+// Previews write change_log rows and roll them back, which burns sequence
+// ids. The checker must not care: previewing every event of a history right
+// before applying it must still give 0 violations. The id gap proves the
+// previews really ran their inserts (otherwise this would test nothing).
+func TestDBChangeLogCheckAfterPreviews(t *testing.T) {
+	pool := dbtest.Pool(t)
+	buildHistory(t, pool, "a", true)
+	wantViolations(t, check(t, pool, "a"))
+	var maxID, count int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COALESCE(max(id), 0), count(*) FROM change_log`).Scan(&maxID, &count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 5 || maxID <= count {
+		t.Fatalf("change_log: %d rows, max id %d; want 5 rows and max id > 5 (ids burned by previews)", count, maxID)
 	}
 }

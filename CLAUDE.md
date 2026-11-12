@@ -34,31 +34,42 @@ a deliberately naive baseline. Honest evidence matters more than features.
 
 ## Status
 Phases 1-5 complete and pushed (baseline, inbox + transactional worker, ordering, chaos harness with
-crashes, claim with lease + poison dead-lettering). CI green on e674670.
+crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-4 pushed (fe27b99, d2e3cf3, b56731c, step 4 commit).
 
-Handoff (2026-11-12):
-- Just finished: Phase 6 steps 2 and 3 of 7. Step 2 (d2e3cf3, pushed, CI green): change capture in
-  app.Apply/worker, FOR NO KEY UPDATE pre-reads (review found a deadlock with FOR UPDATE), sessions forced to UTC.
-  Step 3: sim.CheckChangeLog in chaos (-target relayguard; flag -changelog-check=false for pre-phase-6 workers
-  such as bin/worker-phase4.exe). Kinds: changelog_missing/unexpected/chain_break/final_mismatch/misattributed.
-  Every rule has a negative control proven by mutation. Smokes on the uncommitted tree (not evidence):
-  seeds 1-5 crash+dup+reorder+lease 1s: 0 violations; seeds 1-2 with -poison 1: 0 violations, dead=1 each.
-  Migration 00004 is applied to the dev DB.
-- In progress: Phase 6 (change log, preview, replay, undo). The approved plan is docs/phase6-plan.md, which
-  includes the reviewer notes for later steps. Steps 1-3 are done; steps 4-7 NEED USER APPROVAL before starting.
+Handoff (2026-11-12, end of session):
+- Just finished: Phase 6 step 4 (preview). internal/admin (Preview, Log, formatters), cmd/admin (`preview <id>`,
+  `log <id>`), bin/admin.exe built by dev.ps1 build, db-test includes ./internal/admin/. Preview runs the real
+  app.Apply in an always-rolled-back tx, refuses done events, lock_timeout 2s / statement_timeout 5s, takes
+  FOR KEY SHARE on the inbox row FIRST (review found a preview/worker deadlock otherwise), business-error
+  allow-list (app.ErrUnknownCustomer, app.ErrConcurrentInsert now exported, decode errors) -> exit 0, anything
+  else exit 1. Reviewed and approved; 72 DB tests pass; 3-seed chaos smoke 0 violations (not evidence).
+  Earlier this session: step 2 (d2e3cf3) change capture; step 3 (b56731c) sim.CheckChangeLog with kinds
+  changelog_missing/unexpected/chain_break/final_mismatch/misattributed and chaos flag -changelog-check.
+  Migration 00004 is applied to the dev DB; the dev DB is empty (reset-data after the smoke).
+- In progress: Phase 6. Steps 4, 5a and 5b are APPROVED (docs/phase6-plan.md "Steps 4, 5a, 5b", with the
+  user's answers Q1-Q5). Step 5a has NOT been started. Steps 6-7 still need user approval.
   Results docs that compare relayguard vs naive must say relayguard runs carry extra changelog_* checks.
+- Decisions this session not written elsewhere: commit and push each step separately (4, then 5a, then 5b);
+  the user pre-approved step 4's push only, so 5a and 5b stop at checkpoint B before commit/push. The user
+  lets the lead pick routine commands/options without asking (still ask for deletions, pushes not
+  pre-approved, and irreversible operations). The user does not need to start worker/receiver: the lead
+  starts the receiver in the background for chaos runs and stops it afterwards.
 - User decisions (also in the plan): strict row-version undo (refuse if changed since; in practice newest
   first per customer); row_version via a BEFORE UPDATE trigger; reset-data also wipes admin_actions; undone
   events are not replayable; previews are not audited; no change_log retention for now. Optional step-7
   experiments E4 (undo-all property run) and E5 (naive rerun) are UNDECIDED: ask the user at step 7.
   Keep the Phase 4 worktree C:/dev/relayguard-phase4 and bin/worker-phase4.exe.
-- Uncommitted: nothing (step 3 committed together with this handoff).
+- Uncommitted: nothing (step 4 committed together with this handoff).
   Keep the tree clean before any evidence build: untracked files set vcs.modified=true.
-- Next step: ask the user to approve Phase 6 step 4 (preview: internal/admin, cmd/admin preview/log).
-  Interview notes for steps 1-3 are deferred to the end of Phase 6 (lessons so far: lock strength vs FK
-  KEY SHARE; repeat tests whose bug depends on random map order; one control per rule, because rules that
-  report the same kind mask each other; check attribution, not just counts). Step 5 must decide the inbox
-  fence lock (see the plan's "Step 2 review" note) and make CheckChangeLog count only the current generation.
+- Next step: Phase 6 step 5a via /next-phase (already approved): migration 00005 (inbox.replay_count,
+  CHECK generation >= 0, seq >= 1), fence token (replay_count, attempts), claim and fence FOR NO KEY UPDATE,
+  deadLetterCrashed fenced by generation, Preview/ApplyInbox use replay_count, CheckChangeLog counts only the
+  current generation. Tests and mutations as listed in the plan; regression adds a poison smoke (-poison 2).
+  Running the new migration on the dev DB is part of 5a (00005 is new, so rule 6 does not block it).
+  Interview notes for steps 1-5 are deferred to the end of Phase 6 (lessons so far: lock strength vs FK
+  KEY SHARE; consistent lock order prevents deadlocks (preview inbox-first); repeat tests whose bug depends
+  on random map order; one control per rule, because rules that report the same kind mask each other;
+  check attribution, not just counts; preview = real code + rollback, not a simulation).
 - Notes: gh is at "C:\Program Files\GitHub CLI\gh.exe" if it is not on PATH. Background agents survive
   /clear, so check for running agents and tasklist before builds or experiments.
 

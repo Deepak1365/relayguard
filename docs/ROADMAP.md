@@ -23,8 +23,9 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
   - [x] Step 1: migration 00004 (change_log, admin_actions, row_version trigger), TRUNCATE sites, internal/dbtest (fe27b99)
   - [x] Step 2: change capture in internal/app + worker, subprocess crash test (review fix: FOR NO KEY UPDATE pre-reads)
   - [x] Step 3: CheckChangeLog in the harness + negative controls (incl. per-rule attribution controls, -changelog-check flag)
-  - [ ] Step 4: preview (internal/admin, cmd/admin preview/log)
-  - [ ] Step 5: migration 00005, replay fence (attempts, replay_count), replay
+  - [x] Step 4: preview (internal/admin, cmd/admin preview/log; inbox-first KEY SHARE lock avoids a worker deadlock)
+  - [ ] Step 5a: migration 00005 (replay_count, CHECKs), fence token (replay_count, attempts), claim/fence FOR NO KEY UPDATE, generation-aware checker
+  - [ ] Step 5b: admin replay (dead/stale only, audited, -actor/-reason required, undone guard)
   - [ ] Step 6: undo with conflict explanations
   - [ ] Step 7: evidence runs from a clean tree, docs/phase6-results.md, decision records
 

@@ -59,14 +59,17 @@ switch ($Task) {
         $env:RELAYGUARD_DB_TESTS = "1"
         # -p 1: the packages share the same tables, so they must not run in
         # parallel or one package's TRUNCATE wipes another's rows mid-test.
-        go test -count=1 -p 1 -v ./cmd/worker/ ./internal/dbtest/ ./internal/sim/
+        go test -count=1 -p 1 -v ./cmd/worker/ ./internal/dbtest/ ./internal/sim/ ./internal/admin/
         exit $LASTEXITCODE
     }
     "build" {
-        go build -o bin\worker.exe ./cmd/worker
-        go build -o bin\naive.exe ./cmd/naive
-        go build -o bin\chaos.exe ./cmd/chaos
-        if ($LASTEXITCODE -eq 0) { Write-Host "built bin\worker.exe, bin\naive.exe, bin\chaos.exe" }
+        # Stop at the first failure: checking only the last exit code would
+        # report success after an earlier binary failed to build.
+        foreach ($name in @("worker", "naive", "chaos", "admin")) {
+            go build -o "bin\$name.exe" "./cmd/$name"
+            if ($LASTEXITCODE -ne 0) { Write-Host "build of bin\$name.exe failed"; exit $LASTEXITCODE }
+        }
+        Write-Host "built bin\worker.exe, bin\naive.exe, bin\chaos.exe, bin\admin.exe"
     }
     default {
         Write-Host "Tasks:"
@@ -83,6 +86,6 @@ switch ($Task) {
         Write-Host "  reset-data             empty app tables, inbox, change_log, admin_actions (keeps schema)"
         Write-Host "  test                   go vet + go test"
         Write-Host "  db-test                DB integration tests (TRUNCATES inbox, app, change_log, admin_actions)"
-        Write-Host "  build                  build worker, naive and chaos into bin\"
+        Write-Host "  build                  build worker, naive, chaos and admin into bin\"
     }
 }

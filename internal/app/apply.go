@@ -27,11 +27,12 @@ var (
 	// ErrStale means a newer event has already been applied to the same object.
 	// The event is recorded but deliberately not applied.
 	ErrStale = errors.New("stale event")
-	// errConcurrentInsert: another transaction inserted the subscription
+	// ErrConcurrentInsert: another transaction inserted the subscription
 	// between our locked pre-read (which found nothing) and our upsert (which
 	// then hit the conflict). The before image we hold would be wrong, so the
 	// apply fails and the worker retries; next time the pre-read finds the row.
-	errConcurrentInsert = errors.New("subscription was inserted concurrently after the pre-read; retrying")
+	// Exported so admin.Preview can report it as an outcome of the event.
+	ErrConcurrentInsert = errors.New("subscription was inserted concurrently after the pre-read; retrying")
 )
 
 // Hooks lets experiments inject faults at precise points.
@@ -247,7 +248,7 @@ func classifyUpsert(found, returned, inserted bool) (string, error) {
 		// The upsert updated a row our pre-read did not see: we have no
 		// before image for it. Logging the update without one is impossible
 		// (CHECK) and inventing one would be wrong, so fail and retry.
-		return "", errConcurrentInsert
+		return "", ErrConcurrentInsert
 	default: // inserted && found
 		// The row we hold locked cannot vanish (nothing deletes
 		// subscriptions), so an insert here means something is badly wrong.
