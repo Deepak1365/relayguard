@@ -6,7 +6,8 @@ Act as the team lead for RelayGuard. Focus: $ARGUMENTS (if empty, the first unch
 
 ## Stop and wait for me ONLY at these checkpoints
 A. After the planner's plan: show it and wait for my approval.
-B. Before git commit or git push: show a summary, `git status`, and a proposed commit message.
+B. Before git commit or git push: update the Status section of CLAUDE.md, then show a summary, `git status`,
+   and a proposed commit message.
 C. Before anything irreversible or listed in CLAUDE.md rule 6.
 D. When genuinely blocked: information only I have, a decision that changes the scope, or the same problem
    still failing after 3 fix attempts.

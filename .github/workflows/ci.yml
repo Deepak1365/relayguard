@@ -5,6 +5,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Secret scan (no committed .env, no whsec_ tokens)
+        run: bash scripts/secret-scan.sh
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

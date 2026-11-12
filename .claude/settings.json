@@ -59,7 +59,22 @@
       "Bash(git clean:*)",
       "Bash(rm -rf:*)",
       "Bash(git checkout -- .)",
-      "Bash(cat .env:*)"
+      "Bash(cat .env:*)",
+      "Bash(echo relayguard-deny-canary:*)",
+      "Read(./docs/deny-canary.txt)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-env.ps1\""
+          }
+        ]
+      }
     ]
   }
 }
