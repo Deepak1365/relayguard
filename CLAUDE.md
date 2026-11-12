@@ -34,9 +34,9 @@ a deliberately naive baseline. Honest evidence matters more than features.
 
 ## Status
 Phases 1-5 complete and pushed (baseline, inbox + transactional worker, ordering, chaos harness with
-crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-5a pushed (fe27b99, d2e3cf3, b56731c, 052c0f5,
-425f62d). 9959dce (agent model tiers + token discipline) committed, not pushed: it goes up together with 5b.
-Step 5b implemented, reviewed and approved, awaiting the user's OK to commit (then push both).
+crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-5b pushed (fe27b99, d2e3cf3, b56731c, 052c0f5,
+425f62d, dcde809), plus 9959dce (agent model tiers + token discipline). main is level with origin.
+Step 6 (undo) is PLANNED, NOT APPROVED: the plan is in docs/phase6-plan.md "Step 6 ... PROPOSED".
 
 Handoff (2026-11-12):
 - Just finished: Phase 6 step 5b. internal/admin/replay.go: Replay (dead/stale only; one tx with lock_timeout;
@@ -52,8 +52,9 @@ Handoff (2026-11-12):
   violations. Dev DB empty (reset-data after the smoke).
   Earlier this session: 5a (425f62d) replay_count fence token, FOR NO KEY UPDATE claim/fence, generation-aware
   checker, preview re-reads status+replay_count.
-- In progress: Phase 6. Steps 6 (undo with conflict explanations) and 7 (evidence) need user approval: start
-  step 6 with the planner and checkpoint A. Results docs that compare relayguard vs naive must say relayguard
+- In progress: Phase 6 step 6 (undo), at checkpoint A. The planner's plan is saved in docs/phase6-plan.md
+  "Step 6 ... PROPOSED": present it (key finding: literal strict row-version undo cannot undo newest-first because the
+  trigger bumps row_version; proposed rule B) with Q1-Q6 and wait for approval. Step 7 (evidence) needs approval too. Results docs that compare relayguard vs naive must say relayguard
   runs carry extra changelog_* checks.
 - For step 6 (from reviews): undo must take the inbox row lock (FOR NO KEY UPDATE) FIRST, like Replay, or a
   concurrent undo could commit after Replay's undone guard has read. Undo rows take the generation of the
@@ -63,15 +64,18 @@ Handoff (2026-11-12):
   pushes, and irreversible operations). The user does not start worker/receiver: the lead starts the receiver
   in the background for chaos runs and stops it afterwards. Regression smokes on a dirty tree go to the
   scratchpad, not results/ (evidence only from a clean tree, step 7). /verify's chaos step needs no rerun when
-  the same smoke already ran on the same build.
+  the same smoke already ran on the same build. The user wants a handoff when context reaches ~140k (hook enforces it).
 - User decisions (also in the plan): strict row-version undo (refuse if changed since; in practice newest
   first per customer); row_version via a BEFORE UPDATE trigger; reset-data also wipes admin_actions; undone
   events are not replayable; previews are not audited; no change_log retention for now. Optional step-7
   experiments E4 (undo-all property run) and E5 (naive rerun) are UNDECIDED: ask the user at step 7.
   Keep the Phase 4 worktree C:/dev/relayguard-phase4 and bin/worker-phase4.exe.
-- Uncommitted: step 5b (incl. untracked internal/admin/replay*.go and internal/app/deadletter.go).
+- Uncommitted (commit together after the user's OK, one small commit): the context-handoff hook
+  (.claude/hooks/context-handoff.ps1, .claude/settings.json UserPromptSubmit + PostToolUse; verified firing live at ~280k),
+  the CLAUDE.md Token discipline line and this handoff, and the step 6 proposal in docs/phase6-plan.md.
   Keep the tree clean before any evidence build: untracked files set vcs.modified=true.
-- Next step: after the 5b commit and the push of 9959dce + 5b, plan Phase 6 step 6 (planner -> user approval).
+- Next step: get the user's OK to commit (and push) the uncommitted files above; then present the step 6 plan
+  (checkpoint A) and, once approved, run /next-phase for 6a.
   Interview notes for steps 1-5 are deferred to the end of Phase 6 (lessons so far: lock strength vs FK
   KEY SHARE; consistent lock order prevents deadlocks (preview inbox-first); repeat tests whose bug depends
   on random map order; one control per rule, because rules that report the same kind mask each other;
@@ -102,6 +106,9 @@ Handoff (2026-11-12):
 - Never print whole logs (bin/supervised.log, receiver logs, go test -v output).
 - Prefer a direct request to the lead over /next-phase for small tasks.
 - Lead: give each step a fresh subagent with a tight brief instead of resuming one agent across steps (its context keeps growing).
+- Session handoff at ~140k context: .claude/hooks/context-handoff.ps1 (UserPromptSubmit + PostToolUse) injects a
+  reminder; then update Status, tick ROADMAP, show the diff, and give the user the new-session prompt it contains.
+  Threshold override: env RELAYGUARD_HANDOFF_TOKENS.
 - Agent models: planner and reviewer inherit (Opus); implementer, experiment-runner and interview-coach sonnet.
   The lead may override per call for a hard step (e.g. Opus implementer for concurrency/locking work).
 

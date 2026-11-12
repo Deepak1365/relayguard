@@ -303,5 +303,63 @@ As implemented (5b, implementer, 2026-11-12; reviewed, with the follow-ups below
   poison smoke seeds 1-2 (+ -poison 2): 0 violations, dead=2 per seed; compatibility smoke, seed 1 with bin/worker-phase4.exe
   against 00005 (-changelog-check=false): 0 violations.
 
-## Later steps (NOT now): 6 undo, 7 evidence.
+## Step 6: undo with conflict explanations — PROPOSED by the planner 2026-11-12, NOT APPROVED (checkpoint A)
+Present this to the user with Q1-Q6 and wait for approval before any code.
+
+Key finding: "strict row-version undo" read literally (current row_version == the version the event left) makes newest-first
+undo impossible for any row touched twice: the BEFORE UPDATE trigger forces row_version = OLD+1, so an undo (an UPDATE) can
+never restore an old version. Example: customer.created (v1), invoice.paid (v2), undo invoice (v3), undo customer.created
+expects v1, sees v3 -> refused forever. Same for subscription created/updated. E4 (undo-all) would fail by design.
+Proposed rule B (equally strict): an event can be undone only if every later change to its rows is accounted for in change_log
+and is itself undone.
+
+What undo reverses (reverse seq order): customer.created -> customers delete; invoice.paid -> customers update restoring the
+before image (balance), then credit_grants delete; subscription insert -> delete; subscription update -> restore the before image
+(status, last_event_created, last_event_id, updated_at). Restores all columns except id/row_version via jsonb_populate_record with
+an explicit per-table column list (a schema test keeps it complete); the trigger bumps row_version (+1), so the chain holds.
+Not undoable (audited refusal, ErrNotUndoable): pending, stale, skipped, dead, undone, done without current-generation apply rows.
+
+Conflict rules per affected row (generation = replay_count): 1 row missing; 2 a later change_log apply entry on the row whose
+event is not undone (blocks; named: change_log id, inbox id, event_id, type, generation, "undo inbox #N first"); 3 current
+row_version must equal the after-image version of the last later entry (else "changed outside RelayGuard"); 4 content equals the
+expected image except row_version (defense in depth); 5 customer inserts: no credit_grants/subscriptions row references the
+customer (FK inserts don't bump the parent's version; otherwise 23503). Conflicts -> refused audit row with conflicts JSON,
+ErrConflict, FormatUndo explanation.
+
+Tx flow (internal/admin/undo.go): validate (as replay) -> tx with lock_timeout 2s / statement_timeout 5s -> inbox FOR NO KEY
+UPDATE FIRST (afterLock hook) -> status must be done -> read current-generation apply rows -> lock app rows in reverse seq
+(FOR UPDATE where deleting, FOR NO KEY UPDATE where restoring) -> conflict rules -> done audit row (id needed: undo change_log
+rows require admin_action_id) -> changelog.NewUndo(inboxID, generation, actionID) records each revert (UPDATE/DELETE ... WHERE
+row_version=$cur) -> inbox status 'undone' -> commit; Outcome only after commit. Errors: ErrInvalidInput, ErrNotFound (no audit),
+ErrBusy (nothing written), ErrNotUndoable/ErrConflict (audited refused), other (no outcome; check admin log).
+Lock risk: customer FOR UPDATE vs a worker mid-invoice holding FK KEY SHARE and upgrading; assumed safe (holder upgrade does not
+queue) but UNVERIFIED -> test TestDBUndoCustomerWaitsForWorkerFK; fallback: NO KEY UPDATE + map 23503 to ErrConflict.
+
+Migration 00006_undo.sql (new): inbox status CHECK adds 'undone'; unique index admin_actions_undo_once (inbox_id) WHERE
+action='undo' AND outcome='done'. Down: drop index, undone -> done (lossy, like 00003), old CHECK. Worker needs no change (it
+only claims pending). Preview must also refuse undone; checker treats undone like done for apply rows.
+Interactions: later invoices apply to the restored balance; after a customer.created undo later events for that customer
+dead-letter (not replayable); undoing a subscription update rolls last_event_created back, so older late events apply; events
+already stale stay stale (operator may replay them).
+
+Split: 6a = migration 00006, changelog.NewUndo (Recorder gains source + actionID), admin.Undo, FormatUndo, CLI
+`admin undo <id> -actor -reason`, preview refuses undone, tests. 6b = checker: compareApplyRows treats undone as done; new
+checkUndoRows (presence: missing/unexpected; pairing, restore content, action link, generation -> new kind changelog_bad_undo);
+chain/final/attribution need no change (documented why); controls one per rule + mutations.
+Tests (6a, each with a mutation): UndoCustomerCreated, UndoInvoicePaid, UndoSubscriptionUpdate/Insert, ConflictLaterEvent
+(then newest-first succeeds), ConflictUnloggedWrite, CustomerReferenced, LogDisagreesWithRow, RefusesStatus (5 statuses),
+NoChangeLogRows, ConcurrentSecondIsRefused, Busy, ValidatesInput, NotFound, RefusalAuditFailure, SchemaUndo, ColumnsMatchSchema,
+ReplayRefusesRealUndo, PreviewRefusesUndone, RecorderUndo, worker UndoCustomerWaitsForWorkerFK (-count=20, no 40P01/23503),
+WorkerIgnoresUndoneEvent, LaterInvoiceAfterUndo; unit FormatUndo, NormalizeUndoRequest, ParseArgs/RunUsageError/UndoReportable.
+Regression per sub-step: test, db-test, migrate 00006, crash seeds 1-3, poison seeds 1-2 (dead=2), optional phase-4 compat.
+E4 outline (UNDECIDED, step 7): chaos -undo-all undoes every done event newest first, asserts all succeed, app tables empty,
+all undone, CheckChangeLog 0, replays refused; variant random order with retries, refusals counted verbatim.
+
+Open questions [planner's recommended default]:
+Q1 conflict rule B vs literal rule A [B]. Q2 migration 00006 (undone status + undo-once index) vs derive from admin_actions
+[00006]. Q3 grant reversal: delete the ledger row vs compensating negative grant [delete]. Q4 customer.created undo: allow when
+unreferenced, with a warning, vs not undoable [allow]. Q5 split 6a/6b, separate commits, checkpoint B each [yes]. Q6 stale events
+left by an undone subscription event: document only vs list in FormatUndo vs auto re-queue [document only].
+
+## Later steps (NOT now): 7 evidence.
 Constraints: cmd/naive unchanged; every behaviour change tested; each step its own commit (lead commits after user approval).
