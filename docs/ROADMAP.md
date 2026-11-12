@@ -7,18 +7,11 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 - [x] Phase 2: signed intake, durable inbox, single-transaction worker, retries (docs/phase2-results.md)
 - [x] Phase 3: ordering for subscription events, stale status (docs/phase3-results.md)
 - [x] Phase 4: seeded chaos harness, crash injection, supervisor, batch results (docs/phase4-results.md, results/)
-
-## Phase 5: poison events (claim with lease)  [IN PROGRESS]
-Code delivered (cmd/worker claim/process, FAULT_POISON, chaos -poison/-lease). Remaining:
-- [ ] "Before" evidence with the OLD worker (the Phase 4 worker, built from commit 7b7e855 in a worktree):
-      invoice crashes the worker every time -> stays pending with attempts 0, later event blocked.
-      Requires the RelayGuard receiver (not naive) on 8080.
-- [ ] Unblock, `dev.ps1 test`, `dev.ps1 build`.
-- [ ] "After" evidence with the new worker (WORKER_CRASH_AFTER_GRANT=1, WORKER_LEASE=1s in a restart loop):
-      later event done, invoice dead after 8 attempts with a reason.
-- [ ] Regression: chaos seeds 1-20, -dup 0.2 -reorder 10, crash-rate 0.1, kill-interval 2s, -lease 1s -> results/relayguard-crash-lease.md, expect 0 violations.
-- [ ] Poison: same (including -lease 1s) + -poison 2, seeds 1-5 -> results/relayguard-poison.md, expect 0 violations and dead=2 per seed.
-- [ ] docs/phase5-results.md filled in; commit.
+- [x] Phase 5: claim with lease, fencing, poison dead-lettering (docs/phase5-results.md, results/relayguard-crash-lease.md,
+      results/relayguard-poison.md). Before: poison invoice stuck pending/0 attempts across 99 crashes, later event blocked.
+      After: invoice dead after 8 attempts, later event done. Chaos: 0 violations (seeds 1-20 with lease; seeds 1-5 with poison, dead=2 each).
+      Open questions recorded in the doc: a poison event still blocks later events until it is dead (claim ORDER BY id, restart > lease;
+      unmeasured); fencing not exercised with concurrent workers (Phase 10).
 
 ## Phase 6: change log, preview, replay, undo
 - Record before/after row images for every applied event (change_log table, written in the same transaction).

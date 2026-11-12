@@ -33,8 +33,8 @@ a deliberately naive baseline. Honest evidence matters more than features.
 - migrations/: goose, embedded. docs/: per-phase results and decisions. results/: chaos run outputs (committed).
 
 ## Status
-Phases 1-4 complete (baseline, inbox + transactional worker, ordering, chaos harness with crashes).
-Phase 5 (claim with lease, poison events) is in progress. See docs/ROADMAP.md for what is next.
+Phases 1-5 complete (baseline, inbox + transactional worker, ordering, chaos harness with crashes,
+claim with lease + poison dead-lettering). Next: Phase 6 (change log, preview, replay, undo). See docs/ROADMAP.md.
 
 ## Rules (all agents)
 1. Never run `dev.ps1 reset` or `docker compose down -v` (deletes the database). `dev.ps1 reset-data` is fine.
