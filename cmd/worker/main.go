@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Deepak1365/relayguard/internal/app"
+	"github.com/Deepak1365/relayguard/internal/changelog"
 	"github.com/Deepak1365/relayguard/internal/config"
 	"github.com/Deepak1365/relayguard/internal/db"
 	"github.com/Deepak1365/relayguard/internal/fault"
@@ -83,12 +84,7 @@ func main() {
 	if fault.PoisonEnabled() {
 		log.Printf("FAULT INJECTION ON: %s events crash the worker", fault.PoisonType)
 	}
-	w := &worker{
-		pool:   pool,
-		faults: faults,
-		lease:  lease,
-		hooks:  app.Hooks{AfterGrant: func(string) { faults.Maybe("after_grant") }},
-	}
+	w := newWorker(pool, faults, lease)
 
 	log.Printf("RelayGuard worker started (lease %s, max attempts %d)", lease, maxAttempts)
 	for {
@@ -108,6 +104,20 @@ func main() {
 			case <-time.After(pollInterval):
 			}
 		}
+	}
+}
+
+// newWorker wires the fault injector into the app hooks. Shared by main and
+// the crash test's child process, so that test exercises the real wiring.
+func newWorker(pool *pgxpool.Pool, faults *fault.Injector, lease time.Duration) *worker {
+	return &worker{
+		pool:   pool,
+		faults: faults,
+		lease:  lease,
+		hooks: app.Hooks{AfterGrant: func(string) error {
+			faults.Maybe("after_grant") // exits the process on a hit
+			return nil
+		}},
 	}
 }
 
@@ -217,12 +227,16 @@ func (w *worker) process(ctx context.Context, id int64, attempts int) error {
 	}
 
 	// Savepoint: if the effect fails, undo only the effect and keep the row
-	// locked so the failure is recorded in the same transaction.
+	// locked so the failure is recorded in the same transaction. The change
+	// log rows are written inside the savepoint too, so they share the
+	// effect's fate: a stale, skipped or failed apply leaves none behind.
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("savepoint: %w", err)
 	}
-	applyErr := app.Apply(ctx, sp, evt, w.hooks)
+	// generation 0: replay (phase 6 step 5) will pass inbox.replay_count.
+	rec := changelog.NewApply(id, 0)
+	applyErr := app.Apply(ctx, sp, rec, evt, w.hooks)
 
 	switch {
 	case applyErr == nil:
@@ -230,7 +244,7 @@ func (w *worker) process(ctx context.Context, id int64, attempts int) error {
 			return fmt.Errorf("release savepoint: %w", err)
 		}
 		w.faults.Maybe("before_commit")
-		log.Printf("applied %s (%s)", evt.ID, evt.Type)
+		log.Printf("applied %s (%s), %d changes logged", evt.ID, evt.Type, rec.Len())
 		return finish(ctx, tx, id, "done", "")
 
 	case errors.Is(applyErr, app.ErrUnhandledType):

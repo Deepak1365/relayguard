@@ -21,7 +21,7 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 - Acceptance: unit/integration tests for preview, replay, undo-success and undo-conflict; chaos regression still 0 violations; results doc.
 - Status: IN PROGRESS. Approved plan: docs/phase6-plan.md (7 steps, one commit each).
   - [x] Step 1: migration 00004 (change_log, admin_actions, row_version trigger), TRUNCATE sites, internal/dbtest (fe27b99)
-  - [ ] Step 2: change capture in internal/app + worker, subprocess crash test
+  - [x] Step 2: change capture in internal/app + worker, subprocess crash test (review fix: FOR NO KEY UPDATE pre-reads)
   - [ ] Step 3: CheckChangeLog in the harness + negative control
   - [ ] Step 4: preview (internal/admin, cmd/admin preview/log)
   - [ ] Step 5: migration 00005, replay fence (attempts, replay_count), replay

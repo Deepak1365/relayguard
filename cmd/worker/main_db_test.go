@@ -76,6 +76,10 @@ func TestDBLeaseExpiryAndFencing(t *testing.T) {
 	if n := dbtest.Count(t, pool, "customers"); n != 0 {
 		t.Fatalf("stale worker A wrote %d customers, want 0", n)
 	}
+	// A lost claim never reaches Apply, so it logs nothing either.
+	if n := dbtest.Count(t, pool, "change_log"); n != 0 {
+		t.Fatalf("stale worker A wrote %d change_log rows, want 0", n)
+	}
 
 	if err := b.process(ctx, rowID, attB); err != nil {
 		t.Fatalf("process B: %v", err)
@@ -85,6 +89,9 @@ func TestDBLeaseExpiryAndFencing(t *testing.T) {
 	}
 	if n := dbtest.Count(t, pool, "customers"); n != 1 {
 		t.Fatalf("customers after B: %d, want exactly 1", n)
+	}
+	if n := dbtest.Count(t, pool, "change_log"); n != 1 {
+		t.Fatalf("change_log after B: %d, want exactly 1 (the customer insert)", n)
 	}
 }
 
@@ -223,7 +230,8 @@ func TestDBApplyErrorIsRetriedWithBackoff(t *testing.T) {
 		t.Fatalf("row: %+v, want pending, attempts 1, last_error with the app error", r)
 	}
 	// Only checks that no grant row was written. The customer lookup fails
-	// before any write, so this does not exercise the savepoint rollback.
+	// before any write, so this does not exercise the savepoint rollback;
+	// TestDBApplyErrorAfterWriteRollsBackChangeLog does.
 	if n := dbtest.Count(t, pool, "credit_grants"); n != 0 {
 		t.Fatalf("credit_grants: %d, want 0 (no grant may be written)", n)
 	}

@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,13 +154,23 @@ func Truncate(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
+// DefaultCreated is the Stripe "created" time InsertEvent uses.
+const DefaultCreated int64 = 1793800000
+
 // InsertEvent stores a pending inbox row for event EventPrefix+suffix and
 // returns its id.
 func InsertEvent(t *testing.T, pool *pgxpool.Pool, suffix, typ string, object map[string]any) int64 {
 	t.Helper()
+	return InsertEventAt(t, pool, suffix, typ, DefaultCreated, object)
+}
+
+// InsertEventAt is InsertEvent with an explicit Stripe "created" time, for
+// ordering (stale event) tests.
+func InsertEventAt(t *testing.T, pool *pgxpool.Pool, suffix, typ string, created int64, object map[string]any) int64 {
+	t.Helper()
 	eventID := EventPrefix + suffix
 	payload, err := json.Marshal(map[string]any{
-		"id": eventID, "object": "event", "type": typ, "created": 1793800000,
+		"id": eventID, "object": "event", "type": typ, "created": created,
 		"data": map[string]any{"object": object},
 	})
 	if err != nil {
@@ -249,6 +260,65 @@ func InsertAuditRows(t *testing.T, pool *pgxpool.Pool, inboxID int64) {
 		inboxID, actionID); err != nil {
 		t.Fatalf("insert change_log rows: %v", err)
 	}
+}
+
+// ChangeRow is one change_log row as the tests assert on it. Images are
+// decoded with UseNumber so numeric columns compare exactly (e.g.
+// Before["credit_balance"] == json.Number("0")); a missing image is nil.
+type ChangeRow struct {
+	ID            int64
+	Generation    int
+	Source        string
+	AdminActionID *int64
+	Seq           int
+	Table         string
+	RowID         int64
+	Op            string
+	Before        map[string]any
+	After         map[string]any
+}
+
+// ChangeLog returns inboxID's change_log rows in id order.
+func ChangeLog(t *testing.T, pool *pgxpool.Pool, inboxID int64) []ChangeRow {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT id, generation, source, admin_action_id, seq, table_name, row_id, op,
+		       before_image::text, after_image::text
+		FROM change_log WHERE inbox_id = $1 ORDER BY id`, inboxID)
+	if err != nil {
+		t.Fatalf("query change_log: %v", err)
+	}
+	defer rows.Close()
+	var out []ChangeRow
+	for rows.Next() {
+		var r ChangeRow
+		var before, after *string
+		if err := rows.Scan(&r.ID, &r.Generation, &r.Source, &r.AdminActionID, &r.Seq,
+			&r.Table, &r.RowID, &r.Op, &before, &after); err != nil {
+			t.Fatalf("scan change_log: %v", err)
+		}
+		r.Before = decodeImage(t, before)
+		r.After = decodeImage(t, after)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read change_log: %v", err)
+	}
+	return out
+}
+
+func decodeImage(t *testing.T, img *string) map[string]any {
+	t.Helper()
+	if img == nil {
+		return nil
+	}
+	dec := json.NewDecoder(strings.NewReader(*img))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		t.Fatalf("decode image %s: %v", *img, err)
+	}
+	return m
 }
 
 // CustomerObject is a minimal Stripe customer object for a customer.created

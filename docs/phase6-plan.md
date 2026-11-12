@@ -93,12 +93,13 @@ Acceptance: migrate-status shows 00004 applied; existing DB tests pass; reset-da
 - Stale subscription upsert (ON CONFLICT DO UPDATE ... WHERE false) does not fire the BEFORE UPDATE trigger: no bump, no log row. Matches the plan.
 - generation is NOT NULL with no default: step 2 writes 0 explicitly.
 - Decide before step 5 what generation means on undo rows (generation reverted vs current replay_count); unique index covers apply rows only.
+- Step 2 review (lock hazard for steps 5-6): change_log.inbox_id and admin_actions.inbox_id are FKs to inbox, so any admin replay/undo transaction that inserts them holds FOR KEY SHARE on that inbox row until commit. The worker fence (cmd/worker/main.go, SELECT ... FOR UPDATE on inbox) would then block behind it, and the claim's SKIP LOCKED would skip the row. Decide deliberately in step 5 (option: fence with FOR NO KEY UPDATE, still exclusive against other fences/claims) and test it.
 - No BEFORE INSERT trigger: INSERTs could set row_version freely. App never does; step 3 chain check should require first version = 1. Do not edit 00004 (already applied).
 - Optional in 00005: CHECK (generation >= 0), CHECK (seq >= 1).
 
 ## Step 2: capture in internal/app + worker
 - New package internal/changelog: Change type, Recorder (INSERTs each change_log row immediately through the same pgx.Tx, i.e. the savepoint in process), pure diff formatting.
-- app.Apply gets the recorder. Images via SQL: INSERT ... RETURNING to_jsonb(t.*); UPDATE: SELECT to_jsonb(c.*) ... FOR UPDATE first, then UPDATE ... RETURNING to_jsonb(c.*); subscription upsert: pre-SELECT FOR UPDATE, then upsert RETURNING (xmax = 0) AS inserted, to_jsonb(subscriptions.*); if pre-SELECT found none but upsert hit conflict -> return error (retry), don't log a wrong before image.
+- app.Apply gets the recorder. Images via SQL: INSERT ... RETURNING to_jsonb(t.*); UPDATE: SELECT to_jsonb(c.*) ... FOR NO KEY UPDATE first, then UPDATE ... RETURNING to_jsonb(c.*) (review fix: FOR UPDATE conflicts with the FOR KEY SHARE that FK checks from credit_grants/subscriptions inserts hold on the customer row -> deadlock between two workers on one customer; FOR NO KEY UPDATE is what a plain UPDATE takes anyway. Step 6 undo must use the same lock); subscription upsert: pre-SELECT FOR NO KEY UPDATE, then upsert RETURNING (xmax = 0) AS inserted, to_jsonb(subscriptions.*); if pre-SELECT found none but upsert hit conflict -> return error (retry), don't log a wrong before image.
 - Writing as it goes: the grant's log row must exist before the AfterGrant hook fires.
 - Hooks.AfterGrant becomes func(string) error so tests can fail an apply after a logged write (covers the savepoint path main_db_test.go ~370 says is not exercised).
 - Stale/skipped/lost claim: no rows (savepoint rolled back / fence fails before Apply).

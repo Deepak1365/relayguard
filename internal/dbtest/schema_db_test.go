@@ -5,7 +5,11 @@ package dbtest
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
+
+	"github.com/Deepak1365/relayguard/internal/db"
 )
 
 // The undo path (phase 6, step 6) refuses when a row's row_version moved
@@ -111,6 +115,45 @@ func TestDBTruncateWithChangeLogRows(t *testing.T) {
 	// RESTART IDENTITY: the next inbox row starts at 1 again.
 	if id := InsertEvent(t, pool, "fk_truncate_2", "customer.created", CustomerObject("cus_dbtest_fk2")); id != 1 {
 		t.Fatalf("inbox id after truncate: %d, want 1 (identity restarted)", id)
+	}
+}
+
+// db.Connect must end up with a UTC session even when the URL asks for
+// another timezone, in any spelling of the parameter name: change_log images
+// render timestamptz in the session timezone (see db.SessionTimeZone).
+func TestDBConnectForcesUTC(t *testing.T) {
+	Pool(t) // skip unless DB tests are enabled; holds the test lock
+	ctx := context.Background()
+	base := os.Getenv("DATABASE_URL")
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	// Without the case-insensitive override, a mixed-case key leaves two
+	// timezone settings in the startup message, and which one Postgres keeps
+	// follows Go's random map order (roughly a coin flip per connection). So
+	// each spelling gets several fresh connections; missing the bug in all of
+	// them has probability about 2^-attempts.
+	const attempts = 16
+	for _, param := range []string{"timezone", "TimeZone", "TIMEZONE"} {
+		t.Run(param, func(t *testing.T) {
+			for i := 0; i < attempts; i++ {
+				pool, err := db.Connect(ctx, base+sep+param+"=Europe/Berlin")
+				if err != nil {
+					t.Fatalf("connect: %v", err)
+				}
+				var tz string
+				err = pool.QueryRow(ctx, `SHOW TimeZone`).Scan(&tz)
+				pool.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tz != db.SessionTimeZone {
+					t.Fatalf("URL with %s=Europe/Berlin, connection %d: session TimeZone %q, want %q",
+						param, i+1, tz, db.SessionTimeZone)
+				}
+			}
+		})
 	}
 }
 

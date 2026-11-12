@@ -36,9 +36,12 @@ a deliberately naive baseline. Honest evidence matters more than features.
 Phases 1-5 complete and pushed (baseline, inbox + transactional worker, ordering, chaos harness with
 crashes, claim with lease + poison dead-lettering). CI green on e674670.
 
-Handoff (2026-11-11):
-- Just finished: Phase 6 step 1 of 7, committed fe27b99 (not pushed). Migration 00004 is applied to the
-  dev DB. Audit fixes committed in e674670 (provenance notes for phases 3-4, tighter allow rules, guard-allowlist hook).
+Handoff (2026-11-12):
+- Just finished: Phase 6 step 2 of 7 (change capture: internal/changelog, app.Apply logs before/after images
+  in the worker's savepoint, every UPDATE incl. no-ops; all DB sessions forced to timezone=UTC). Review found a
+  deadlock (FOR UPDATE pre-read vs FK KEY SHARE); fixed with FOR NO KEY UPDATE + regression test.
+  3-seed chaos smoke (crash, dup, reorder, lease 1s) on the uncommitted tree: 0 violations (smoke, not evidence).
+  Step 1 committed fe27b99. Steps 1-2 not pushed yet. Migration 00004 is applied to the dev DB.
 - In progress: Phase 6 (change log, preview, replay, undo). The approved plan is docs/phase6-plan.md, which
   includes the reviewer notes for later steps. The user approved steps 1-3 for this round; steps 4-7 need approval again.
 - User decisions (also in the plan): strict row-version undo (refuse if changed since; in practice newest
@@ -46,10 +49,12 @@ Handoff (2026-11-11):
   events are not replayable; previews are not audited; no change_log retention for now. Optional step-7
   experiments E4 (undo-all property run) and E5 (naive rerun) are UNDECIDED: ask the user at step 7.
   Keep the Phase 4 worktree C:/dev/relayguard-phase4 and bin/worker-phase4.exe.
-- Uncommitted: nothing. The plan, this handoff and the ROADMAP step list were committed together.
+- Uncommitted: nothing (step 2 committed together with this handoff).
   Keep the tree clean before any evidence build: untracked files set vcs.modified=true.
-- Next step: Phase 6 step 2, change capture in internal/app and the worker (docs/phase6-plan.md "Step 2").
-  It must log every UPDATE, including no-op ones (the trigger bumps row_version anyway), and needs a 0-credit invoice test.
+- Next step: Phase 6 step 3, CheckChangeLog in the harness + negative control (docs/phase6-plan.md "Step 3").
+  Interview notes for steps 1-3 are deferred to the end of Phase 6 (lessons so far: lock strength vs FK
+  KEY SHARE; repeat tests whose bug depends on random map order). Step 5 must decide the inbox fence lock
+  (see the plan's "Step 2 review" note).
 - Notes: gh is at "C:\Program Files\GitHub CLI\gh.exe" if it is not on PATH. Background agents survive
   /clear, so check for running agents and tasklist before builds or experiments.
 
