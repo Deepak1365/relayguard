@@ -58,6 +58,25 @@ func seedScope(seed int64) changeLogScope {
 //  3. Per app row: the last after image equals the row as stored, and every
 //     row in scope has at least one entry.
 //  4. Per apply row: its content belongs to its event (see checkAttribution).
+//  5. Per event: its undo rows (admin undo, phase 6 step 6) are present
+//     exactly when it is undone and revert its apply rows faithfully (see
+//     judgeUndo).
+//
+// Undo (step 6b) needs no change to checks 2-4, by construction:
+//   - chains (2) read every entry of a row whatever its source, ordered by
+//     id. An undo row is appended after the entries it reverts; its before
+//     image is the row as it stood, so it chains; an undo update goes
+//     through the row_version trigger (+1, which the chain requires); an
+//     undo delete is the row's last entry (ids are never reused). Undo rows
+//     carry the undone event's inbox_id, so the scope still finds a
+//     deleted row's entries through the scope CTE's change_log branch.
+//   - final state (3) folds the last entry, so a restore must equal the
+//     stored row, and an undo delete must leave the row gone.
+//   - attribution (4) reads source='apply' rows only, which undo never
+//     changes, so an undone event's apply rows still belong to it.
+//
+// Count (1) does change: an undone event keeps its apply rows, so it is
+// judged like a done one (compareApplyRows).
 //
 // Rows in scope: this seed's customers, their grants, this seed's
 // subscriptions (or ones owned by this seed's customers), plus any row this
@@ -84,9 +103,14 @@ func checkChangeLog(ctx context.Context, pool *pgxpool.Pool, sc changeLogScope) 
 	if err != nil {
 		return nil, fmt.Errorf("change_log attribution: %w", err)
 	}
+	undo, err := checkUndoRows(ctx, pool, sc)
+	if err != nil {
+		return nil, fmt.Errorf("change_log undo rows: %w", err)
+	}
 	v = append(v, chains...)
 	v = append(v, final...)
-	return append(v, attr...), nil
+	v = append(v, attr...)
+	return append(v, undo...), nil
 }
 
 // checkAttribution checks that each apply row's content belongs to the event
@@ -196,12 +220,14 @@ func expectedApplyTables(eventType string) []string {
 
 // compareApplyRows judges one inbox event's apply rows: their tables and seq
 // numbers, both in seq order. Only done events have an effect; any other
-// status must have none. With the right tables, seq must still run 1..n:
-// the Recorder numbers every apply from 1, so a gap or offset means rows
-// were renumbered or moved between events.
+// status must have none. An undone event is judged like a done one: undo
+// never deletes apply rows, it adds undo rows (checked by judgeUndo), so
+// the apply that happened is still fully on record. With the right tables,
+// seq must still run 1..n: the Recorder numbers every apply from 1, so a
+// gap or offset means rows were renumbered or moved between events.
 func compareApplyRows(eventID, eventType, status string, got []string, seqs []int32) *Violation {
 	var want []string
-	if status == "done" {
+	if status == "done" || status == "undone" {
 		want = expectedApplyTables(eventType)
 	}
 	detail := fmt.Sprintf("%s %s: logged [%s], want [%s]",

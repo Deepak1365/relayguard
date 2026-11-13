@@ -435,5 +435,49 @@ As implemented (6a, implementer, 2026-11-12; not yet reviewed):
   - Limitation: before/after images are compared as decoded JSON, so timestamps compare as text. That relies on every session
     using the UTC time zone, pinned by SessionTimeZone and forceSessionTimeZone in internal/db/db.go (applied in Connect).
 
+As implemented (6b, implementer, 2026-11-13; not yet reviewed):
+- compareApplyRows judges 'undone' like 'done' (undo adds rows, never removes apply rows).
+- internal/sim/changelog_undo_check.go: checkUndoRows (wired into checkChangeLog) loads, per in-scope event, status,
+  replay_count, the done undo admin_actions row and the current-generation apply count, plus every undo row joined to the
+  apply row at the mirrored position (apply seq n+1-k for undo seq k). Pure judgeUndo reports the FIRST failing rule per
+  event: 1 presence (undone without undo rows -> changelog_missing; undo rows on a non-undone event, or without a done undo
+  audit row -> changelog_unexpected; existing kinds, as the plan's "presence: missing/unexpected" reads); 2 action link;
+  3 generation (= replay_count, frozen because undone events are not replayable); 4 pairing (count, seq 1..n, same table/row
+  in reverse order); 5 restore (insert -> delete; update -> update whose after image equals the apply's before image minus
+  row_version, typed compare via imagesEqualSQL). Rules 2-5 -> new kind changelog_bad_undo. Generation is checked before
+  pairing so a wrong generation is named as such.
+- "Chain/final/attribution need no change" HELD (checked against the code, documented on CheckChangeLog): chains read all
+  sources ordered by id (an undo row chains on the row's last image; updates go through the +1 trigger; a delete is last);
+  undo rows carry the undone event's inbox_id, so the scope CTE's change_log branch still finds deleted rows; final state folds
+  the last entry (a delete must leave the row gone); attribution reads source='apply' only. TestDBChangeLogCheckRealUndoClean
+  confirms it on real undos (0 violations after every single undo).
+- Tests: unit TestJudgeUndo (one case per rule/condition), TestCompareApplyRows +4 undone cases; DB positive
+  TestDBChangeLogCheckRealUndoClean (history + dead invoice replayed into generation 1; undo all five done events newest
+  first with the real admin.Undo, clean after each; a refused re-undo stays clean; app tables empty, 5 undone, 7 undo rows,
+  2 of them in generation 1); DB controls one per rule: UndoPresence (4 subtests after review round 1, exact full report), UndoActionLink (rows
+  pointed at the event's refused re-undo audit row), UndoGeneration, UndoPairing (forward order via seq swap; ids and chains
+  unchanged), UndoRestore (content, insert reverted by an update). Each asserts exactly one violation for the event with
+  that rule's kind and reason; the restore controls filter to the event subject because image damage also breaks row chains.
+- Mutations (applied by script, reverted): presence-missing off, status condition off, done-action condition off (originally
+  panicked on the nil action in rule 2; since the lead's guard before rule 2 it is an equivalent mutation, see below), action link off, generation off, pairing table/row off -> each fails
+  only its own control; pairing SQL forward order, restore compare keeping row_version, compareApplyRows without undone,
+  checker not wired -> RealUndoClean and/or all controls; restore content off and insert->delete off -> their own
+  subtest only; pairing count, seq 1..n and update->update off -> TestJudgeUndo only (no DB control for these three
+  sub-conditions; the DB pairing and restore controls cover one condition of each rule).
+- Review round 1 fixes: (a) a done undo audit row with no undo rows and status not undone is now flagged changelog_missing
+  ("done undo action #N but no undo rows (status S)"), because the audit row makes Undo/Replay refuse the event forever while
+  the effect stays applied; TestJudgeUndo case + 4th UndoPresence subtest (exact full report); mutation (case off) fails both.
+  (b) checkUndoRows reads events and undo rows in ONE REPEATABLE READ READ ONLY transaction (an inbox row committed between
+  two READ COMMITTED statements gave a nil map entry and a panic), plus a defensive error instead of a panic if an undo row's
+  inbox is missing. The other CheckChangeLog reads are one statement each, so each is internally consistent; they are not
+  snapshot-consistent with each other (only matters on a live system, not after the supervisor has stopped); not widened.
+  (c) rule 5 skips a nil pair (unreachable after rule 4, kept as a guard). Earlier "caught by a panic" mutation (done-action condition off) only proved the test fails, not that the report is right; re-run after the fixes it STILL panicked (rule 2 dereferenced DoneAction, which rule 1 guarantees). The lead then added a
+  nil guard before rule 2 that reports the same changelog_unexpected violation; with the done-action condition off the
+  mutation is now equivalent (TestJudgeUndo passes with the correct report, no panic), so the checker no longer depends on
+  rule order to avoid a panic. Removing rule
+  4's nil-pair rejection now makes TestJudgeUndo "pairing none" fail by assertion, not by panic.
+- Known limit, not checked: undo row ids increasing with seq (no correctness impact; chains already order by id).
+- Not added (by scope): chaos -undo-all (E4, undecided).
+
 ## Later steps (NOT now): 7 evidence.
 Constraints: cmd/naive unchanged; every behaviour change tested; each step its own commit (lead commits after user approval).

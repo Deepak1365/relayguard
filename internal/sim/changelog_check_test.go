@@ -55,6 +55,11 @@ func TestCompareApplyRows(t *testing.T) {
 		{"invoice.paid", "dead", []string{"credit_grants"}, KindChangeLogUnexpected},
 		{"invoice.paid", "pending", nil, ""},
 		{"charge.refunded", "done", []string{"customers"}, KindChangeLogUnexpected}, // unknown type has no effect
+		// Undone keeps its apply rows (step 6b): judged exactly like done.
+		{"invoice.paid", "undone", []string{"credit_grants", "customers"}, ""},
+		{"invoice.paid", "undone", []string{"credit_grants"}, KindChangeLogMissing},
+		{"customer.created", "undone", nil, KindChangeLogMissing},
+		{"customer.created", "undone", []string{"customers", "customers"}, KindChangeLogUnexpected},
 	}
 	for _, c := range cases {
 		// Well-numbered seqs here; numbering is tested below.

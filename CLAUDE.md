@@ -39,7 +39,15 @@ crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-5b pushed (f
 committed locally, NOT pushed: push it together with 6a after the user's OK.
 Step 6 (undo) plan APPROVED 2026-11-12 (Q1-Q6 = planner defaults, recorded in docs/phase6-plan.md).
 
-Update (2026-11-13): step 6a (undo) implemented and reviewed, awaiting commit at checkpoint B.
+Update (2026-11-13): step 6a (undo) committed as 14ae77f; step 6b (checker for undo rows) committed after it.
+Push 370f3eb + 14ae77f + 6b together after the user's OK (user chose to push with 6b). Next: step 7 (evidence), which
+needs the user's approval; ask about the optional E4 (undo-all) and E5 (naive rerun) experiments then.
+- 6b: internal/sim/changelog_undo_check.go (checkUndoRows: presence -> changelog_missing/unexpected, incl. a done undo
+  audit row with nothing reverted; action link, generation, pairing k<->n+1-k, restore -> changelog_bad_undo; one
+  violation per event, first failing rule; both reads in one REPEATABLE READ READ ONLY tx). compareApplyRows treats
+  undone as done. Chain/final/attribution checks verified to need no change. One DB control per rule plus
+  TestDBChangeLogCheckRealUndoClean. 124 top-level tests in the DB packages pass. Regression smoke6b (scratchpad, not
+  evidence): crash 1-3, poison 1-2 (dead=2), compat seed 1, all 0 violations. Dev DB empty.
 - 6a: migration 00006 (status 'undone', unique index admin_actions_undo_once), changelog.NewUndo (source + action id),
   internal/admin/undo.go (rule B conflicts 1-5 plus a chain check: every later change_log entry's before image must
   equal the previous after image incl. row_version -> kind chain_break; reverse-seq locking, pinned by
