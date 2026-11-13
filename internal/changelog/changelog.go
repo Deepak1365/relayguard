@@ -61,14 +61,23 @@ func (c Change) validate() error {
 	return nil
 }
 
-// Recorder numbers and stores the changes of ONE apply of one inbox event.
-// Create a new Recorder for every apply attempt: seq starts at 1 each time,
-// and the unique index (inbox_id, generation, seq) WHERE source = 'apply'
-// then guarantees that one generation of an event can commit only one set of
-// changes. Not safe for concurrent use (one apply is sequential anyway).
+// Sources, as stored in change_log.source.
+const (
+	SourceApply = "apply"
+	SourceUndo  = "undo"
+)
+
+// Recorder numbers and stores the changes of ONE apply (or one undo) of one
+// inbox event. Create a new Recorder for every attempt: seq starts at 1 each
+// time, and the unique indexes (inbox_id, generation, seq) WHERE source =
+// 'apply' and (admin_action_id, seq) WHERE source = 'undo' then guarantee
+// that one generation of an event, or one undo action, can commit only one
+// set of changes. Not safe for concurrent use (both are sequential anyway).
 type Recorder struct {
 	inboxID    int64
 	generation int
+	source     string
+	actionID   *int64 // the admin_actions row of an undo; nil for an apply
 	seq        int
 }
 
@@ -76,7 +85,15 @@ type Recorder struct {
 // event's replay generation: inbox.replay_count as confirmed by the caller's
 // fence (0 for an event that was never replayed).
 func NewApply(inboxID int64, generation int) *Recorder {
-	return &Recorder{inboxID: inboxID, generation: generation}
+	return &Recorder{inboxID: inboxID, generation: generation, source: SourceApply}
+}
+
+// NewUndo returns a Recorder for source='undo' rows written by admin undo
+// action actionID. generation is the generation of the apply being reverted
+// (not a new one: an undo opens no generation), so the apply rows and the
+// undo rows that cancel them carry the same number and pair up.
+func NewUndo(inboxID int64, generation int, actionID int64) *Recorder {
+	return &Recorder{inboxID: inboxID, generation: generation, source: SourceUndo, actionID: &actionID}
 }
 
 // Record inserts c as the next change_log row through tx, which must be the
@@ -91,8 +108,9 @@ func (r *Recorder) Record(ctx context.Context, tx pgx.Tx, c Change) error {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO change_log
 			(inbox_id, generation, source, admin_action_id, seq, table_name, row_id, op, before_image, after_image)
-		VALUES ($1, $2, 'apply', NULL, $3, $4, $5, $6, $7::text::jsonb, $8::text::jsonb)`,
-		r.inboxID, r.generation, seq, c.Table, c.RowID, c.Op, jsonbArg(c.Before), jsonbArg(c.After)); err != nil {
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::jsonb, $10::text::jsonb)`,
+		r.inboxID, r.generation, r.source, r.actionID, seq, c.Table, c.RowID, c.Op,
+		jsonbArg(c.Before), jsonbArg(c.After)); err != nil {
 		return fmt.Errorf("record change %d (%s %s %d): %w", seq, c.Op, c.Table, c.RowID, err)
 	}
 	// Advance only after a successful insert. A failed insert aborts the

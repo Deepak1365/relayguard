@@ -1,7 +1,7 @@
 // Package admin holds operator tools on top of the inbox and change_log:
 // preview (what would applying this event change?), log (what did it
-// change?) and replay (audited: run a dead or stale event again). Undo comes
-// in a later step.
+// change?), replay (audited: run a dead or stale event again) and undo
+// (audited: revert a done event's recorded changes).
 package admin
 
 import (
@@ -31,9 +31,12 @@ var (
 	// ErrChanged: the event was processed while the preview ran, so the
 	// preview no longer describes what would happen.
 	ErrChanged = errors.New("event changed during the preview; run it again")
+	// ErrUndone: the event was undone; it will never be applied again, so
+	// there is nothing to preview.
+	ErrUndone = errors.New("event was undone and will not be applied again; use log <id> to see its changes and the undo")
 )
 
-// Options bounds how long a preview or replay may wait or run. Zero values
+// Options bounds how long a preview, replay or undo may wait or run. Zero values
 // use the defaults. Short limits matter because both take row locks the
 // worker also needs: they must never hold up the worker for long.
 type Options struct {
@@ -45,8 +48,8 @@ type Options struct {
 	// lets a test commit a concurrent change at the one point the re-read
 	// exists to catch.
 	beforeReread func()
-	// afterLock, if set, runs in Replay right after the inbox row is locked
-	// and read. Test hook only, for the concurrent-replay test.
+	// afterLock, if set, runs in Replay and Undo right after the inbox row is
+	// locked and read. Test hook only, for the concurrency tests.
 	afterLock func()
 }
 
@@ -135,8 +138,14 @@ func Preview(ctx context.Context, pool *pgxpool.Pool, inboxID int64, opts Option
 	if err != nil {
 		return res, classify("read inbox", err)
 	}
-	if res.Status == "done" {
+	switch res.Status {
+	case "done":
 		return res, fmt.Errorf("inbox %d: %w", inboxID, ErrNotPreviewable)
+	case "undone":
+		// Its effect was reverted and it is never applied again (the worker
+		// only claims pending, replay refuses it), so "what would applying it
+		// do" describes nothing that can happen.
+		return res, fmt.Errorf("inbox %d: %w", inboxID, ErrUndone)
 	}
 
 	var evt stripeevent.Event

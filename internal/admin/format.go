@@ -99,6 +99,34 @@ func FormatReplay(r ReplayResult) string {
 	return b.String()
 }
 
+// FormatUndo renders an undo result (done or refused) for a terminal. Pure.
+// A done undo lists the undo change_log rows it wrote and any warnings (a
+// deleted customer); a conflict refusal lists every conflict with its
+// explanation ("undo inbox #N first" or "changed outside RelayGuard").
+func FormatUndo(r UndoResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "UNDO inbox %d (%s, %s): %s, audit action #%d\n",
+		r.InboxID, r.EventID, r.EventType, r.Outcome, r.ActionID)
+	switch r.Outcome {
+	case UndoDone:
+		fmt.Fprintf(&b, "was: status %s, generation %d; now: status undone\n", r.Status, r.Generation)
+		fmt.Fprintf(&b, "reverted %d change(s), newest first:\n", len(r.Changes))
+		for i, c := range r.Changes {
+			fmt.Fprintf(&b, "  %d. %s\n", i+1, changeLine(c))
+		}
+		for _, w := range r.Warnings {
+			fmt.Fprintf(&b, "warning: %s\n", w)
+		}
+	case UndoRefused:
+		fmt.Fprintf(&b, "was: status %s, generation %d\n", r.Status, r.Generation)
+		fmt.Fprintf(&b, "refused: %s (nothing changed; the refusal is audited)\n", r.Reason)
+		for _, c := range r.Conflicts {
+			fmt.Fprintf(&b, "  - %s %d [%s]: %s\n", c.Table, c.RowID, c.Kind, c.Explanation)
+		}
+	}
+	return b.String()
+}
+
 // wasGeneration is the generation before the request: a done replay raised
 // it by one.
 func (r ReplayResult) wasGeneration() int {

@@ -150,6 +150,43 @@ refused: status done is not replayable (only dead and stale) (nothing changed; t
 	}
 }
 
+func TestFormatUndo(t *testing.T) {
+	done := UndoResult{InboxID: 9, EventID: "evt_9", EventType: "customer.created", Status: "done", Generation: 0,
+		Outcome: UndoDone, ActionID: 5,
+		Changes: []changelog.Change{{Table: "customers", RowID: 1, Op: changelog.OpDelete,
+			Before: []byte(`{"id": 1, "row_version": 1, "credit_balance": 0}`)}},
+		Warnings: []string{"customer cus_x (id 1) was deleted: ..."}}
+	refused := UndoResult{InboxID: 9, EventID: "evt_9", EventType: "invoice.paid", Status: "done", Generation: 1,
+		Outcome: UndoRefused, ActionID: 6, Reason: "2 conflict(s) with later changes",
+		Conflicts: []Conflict{
+			{Kind: ConflictLaterEvent, Table: "customers", RowID: 1, Explanation: "change_log #4: ... undo inbox #3 first"},
+			{Kind: ConflictVersion, Table: "customers", RowID: 1, Explanation: "row_version is 5 ...: changed outside RelayGuard"},
+		}}
+	cases := []struct {
+		name string
+		r    UndoResult
+		want string
+	}{
+		{"done", done, `UNDO inbox 9 (evt_9, customer.created): done, audit action #5
+was: status done, generation 0; now: status undone
+reverted 1 change(s), newest first:
+  1. ` + changeLine(done.Changes[0]) + `
+warning: customer cus_x (id 1) was deleted: ...
+`},
+		{"refused", refused, `UNDO inbox 9 (evt_9, invoice.paid): refused, audit action #6
+was: status done, generation 1
+refused: 2 conflict(s) with later changes (nothing changed; the refusal is audited)
+  - customers 1 [later_event]: change_log #4: ... undo inbox #3 first
+  - customers 1 [changed_outside]: row_version is 5 ...: changed outside RelayGuard
+`},
+	}
+	for _, c := range cases {
+		if got := FormatUndo(c.r); got != c.want {
+			t.Errorf("%s:\n got:\n%s\nwant:\n%s", c.name, got, c.want)
+		}
+	}
+}
+
 func TestCrashedLastError(t *testing.T) {
 	for _, c := range []struct {
 		lastErr string

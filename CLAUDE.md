@@ -35,11 +35,27 @@ a deliberately naive baseline. Honest evidence matters more than features.
 ## Status
 Phases 1-5 complete and pushed (baseline, inbox + transactional worker, ordering, chaos harness with
 crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-5b pushed (fe27b99, d2e3cf3, b56731c, 052c0f5,
-425f62d, dcde809), plus 9959dce (agent model tiers + token discipline). main is level with origin.
-Step 6 (undo) is PLANNED, NOT APPROVED: the plan is in docs/phase6-plan.md "Step 6 ... PROPOSED".
+425f62d, dcde809), plus 9959dce (agent model tiers + token discipline). 370f3eb (handoff hook, step 6 plan) is
+committed locally, NOT pushed: push it together with 6a after the user's OK.
+Step 6 (undo) plan APPROVED 2026-11-12 (Q1-Q6 = planner defaults, recorded in docs/phase6-plan.md).
 
-Handoff (2026-11-12):
-- Just finished: Phase 6 step 5b. internal/admin/replay.go: Replay (dead/stale only; one tx with lock_timeout;
+Update (2026-11-13): step 6a (undo) implemented and reviewed, awaiting commit at checkpoint B.
+- 6a: migration 00006 (status 'undone', unique index admin_actions_undo_once), changelog.NewUndo (source + action id),
+  internal/admin/undo.go (rule B conflicts 1-5 plus a chain check: every later change_log entry's before image must
+  equal the previous after image incl. row_version -> kind chain_break; reverse-seq locking, pinned by
+  TestDBApplyWritesExistingRowLast), FormatUndo, CLI `admin undo <id> -actor -reason`, preview refuses undone (ErrUndone).
+  Review round 1 found BLOCKING: an unlogged write between two logged entries was silently wiped after undoing the
+  later event (fixed by the chain check, test reproduces it). Round 2 APPROVED; follow-ups added (undo across undo->apply
+  links, subscription chain across undo+replay at generation 1). 117 top-level tests in the DB packages pass (91 TestDB*).
+  Mutations listed in the plan note. FK-wait test 20/20 (fallback not needed).
+  Regression on the dirty tree (scratchpad smoke6a, not evidence): crash seeds 1-3, poison 1-2 (dead=2 each), compat
+  seed 1 with bin/worker-phase4.exe, all 0 violations. Dev DB empty (reset-data).
+- Next: commit 6a (user OK), push 370f3eb + 6a (user OK), then 6b (harness checker) with a fresh implementer.
+- User preference (2026-11-13): quality over speed; keep the full loop. The user hibernates the laptop at times:
+  they will say so, and the lead then stops at a checkpoint (sleep mid-agent stalls the stream).
+
+Handoff (2026-11-12, still relevant below):
+- Earlier: Phase 6 step 5b. internal/admin/replay.go: Replay (dead/stale only; one tx with lock_timeout;
   SELECT inbox FOR NO KEY UPDATE; undone guard; refusals audited 'refused' and committed -> ErrNotReplayable;
   accept = one UPDATE resetting status/attempts/last_error/processed_at/next_attempt_at and bumping
   replay_count, plus a 'done' audit row with from_* detail and generation; input validated before the DB;
@@ -52,9 +68,8 @@ Handoff (2026-11-12):
   violations. Dev DB empty (reset-data after the smoke).
   Earlier this session: 5a (425f62d) replay_count fence token, FOR NO KEY UPDATE claim/fence, generation-aware
   checker, preview re-reads status+replay_count.
-- In progress: Phase 6 step 6 (undo), at checkpoint A. The planner's plan is saved in docs/phase6-plan.md
-  "Step 6 ... PROPOSED": present it (key finding: literal strict row-version undo cannot undo newest-first because the
-  trigger bumps row_version; proposed rule B) with Q1-Q6 and wait for approval. Step 7 (evidence) needs approval too. Results docs that compare relayguard vs naive must say relayguard
+- Step 6 plan key finding: literal strict row-version undo cannot undo newest-first because the trigger bumps
+  row_version, hence rule B (approved). Step 7 (evidence) needs approval too. Results docs that compare relayguard vs naive must say relayguard
   runs carry extra changelog_* checks.
 - For step 6 (from reviews): undo must take the inbox row lock (FOR NO KEY UPDATE) FIRST, like Replay, or a
   concurrent undo could commit after Replay's undone guard has read. Undo rows take the generation of the
@@ -70,13 +85,9 @@ Handoff (2026-11-12):
   events are not replayable; previews are not audited; no change_log retention for now. Optional step-7
   experiments E4 (undo-all property run) and E5 (naive rerun) are UNDECIDED: ask the user at step 7.
   Keep the Phase 4 worktree C:/dev/relayguard-phase4 and bin/worker-phase4.exe.
-- Uncommitted (commit together after the user's OK, one small commit): the context-handoff hook
-  (.claude/hooks/context-handoff.ps1, .claude/settings.json UserPromptSubmit + PostToolUse; verified firing live at ~280k),
-  the CLAUDE.md Token discipline line and this handoff, and the step 6 proposal in docs/phase6-plan.md.
+- The context-handoff hook (.claude/hooks/context-handoff.ps1, settings.json UserPromptSubmit + PostToolUse) is in 370f3eb.
   Keep the tree clean before any evidence build: untracked files set vcs.modified=true.
-- Next step: get the user's OK to commit (and push) the uncommitted files above; then present the step 6 plan
-  (checkpoint A) and, once approved, run /next-phase for 6a.
-  Interview notes for steps 1-5 are deferred to the end of Phase 6 (lessons so far: lock strength vs FK
+- Interview notes for steps 1-5 are deferred to the end of Phase 6 (lessons so far: lock strength vs FK
   KEY SHARE; consistent lock order prevents deadlocks (preview inbox-first); repeat tests whose bug depends
   on random map order; one control per rule, because rules that report the same kind mask each other;
   check attribution, not just counts; preview = real code + rollback, not a simulation; 5a: ABA on a reset

@@ -17,9 +17,9 @@ var (
 	// and stale events can be replayed, and never one that was undone). The
 	// refusal itself is audited.
 	ErrNotReplayable = errors.New("event cannot be replayed")
-	// ErrInvalidInput: actor or reason missing or too long. Checked before
-	// the database is touched, so nothing is written or audited.
-	ErrInvalidInput = errors.New("invalid replay request")
+	// ErrInvalidInput: actor or reason missing or too long (replay or undo).
+	// Checked before the database is touched, so nothing is written or audited.
+	ErrInvalidInput = errors.New("invalid admin request")
 )
 
 // Limits on the audit fields, in characters (runes), after trimming.
@@ -64,20 +64,28 @@ type ReplayResult struct {
 // and within limits. Pure: the CLI uses it to reject bad input before it
 // even loads settings, and Replay calls it before touching the database.
 func NormalizeReplayRequest(r ReplayRequest) (ReplayRequest, error) {
-	r.Actor, r.Reason = strings.TrimSpace(r.Actor), strings.TrimSpace(r.Reason)
+	var err error
+	r.Actor, r.Reason, err = normalizeAudit(r.InboxID, r.Actor, r.Reason)
+	return r, err
+}
+
+// normalizeAudit is the validation shared by replay and undo: both write the
+// same audit fields, so they must accept exactly the same input.
+func normalizeAudit(inboxID int64, actor, reason string) (string, string, error) {
+	actor, reason = strings.TrimSpace(actor), strings.TrimSpace(reason)
 	switch {
-	case r.InboxID <= 0:
-		return r, fmt.Errorf("%w: inbox id must be positive, got %d", ErrInvalidInput, r.InboxID)
-	case r.Actor == "":
-		return r, fmt.Errorf("%w: actor is required", ErrInvalidInput)
-	case r.Reason == "":
-		return r, fmt.Errorf("%w: reason is required", ErrInvalidInput)
-	case utf8.RuneCountInString(r.Actor) > maxActorLen:
-		return r, fmt.Errorf("%w: actor is longer than %d characters", ErrInvalidInput, maxActorLen)
-	case utf8.RuneCountInString(r.Reason) > maxReasonLen:
-		return r, fmt.Errorf("%w: reason is longer than %d characters", ErrInvalidInput, maxReasonLen)
+	case inboxID <= 0:
+		return actor, reason, fmt.Errorf("%w: inbox id must be positive, got %d", ErrInvalidInput, inboxID)
+	case actor == "":
+		return actor, reason, fmt.Errorf("%w: actor is required", ErrInvalidInput)
+	case reason == "":
+		return actor, reason, fmt.Errorf("%w: reason is required", ErrInvalidInput)
+	case utf8.RuneCountInString(actor) > maxActorLen:
+		return actor, reason, fmt.Errorf("%w: actor is longer than %d characters", ErrInvalidInput, maxActorLen)
+	case utf8.RuneCountInString(reason) > maxReasonLen:
+		return actor, reason, fmt.Errorf("%w: reason is longer than %d characters", ErrInvalidInput, maxReasonLen)
 	}
-	return r, nil
+	return actor, reason, nil
 }
 
 // replayable is the allow-list of statuses a replay may start from (user

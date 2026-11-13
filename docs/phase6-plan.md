@@ -303,8 +303,9 @@ As implemented (5b, implementer, 2026-11-12; reviewed, with the follow-ups below
   poison smoke seeds 1-2 (+ -poison 2): 0 violations, dead=2 per seed; compatibility smoke, seed 1 with bin/worker-phase4.exe
   against 00005 (-changelog-check=false): 0 violations.
 
-## Step 6: undo with conflict explanations — PROPOSED by the planner 2026-11-12, NOT APPROVED (checkpoint A)
-Present this to the user with Q1-Q6 and wait for approval before any code.
+## Step 6: undo with conflict explanations — APPROVED by the user 2026-11-12 (checkpoint A passed)
+User decisions: Q1 rule B; Q2 migration 00006; Q3 delete the ledger row; Q4 allow customer.created undo when unreferenced,
+with a warning; Q5 split 6a/6b, separate commits, checkpoint B each; Q6 document only. (All = the planner's defaults.)
 
 Key finding: "strict row-version undo" read literally (current row_version == the version the event left) makes newest-first
 undo impossible for any row touched twice: the BEFORE UPDATE trigger forces row_version = OLD+1, so an undo (an UPDATE) can
@@ -360,6 +361,79 @@ Q1 conflict rule B vs literal rule A [B]. Q2 migration 00006 (undone status + un
 [00006]. Q3 grant reversal: delete the ledger row vs compensating negative grant [delete]. Q4 customer.created undo: allow when
 unreferenced, with a warning, vs not undoable [allow]. Q5 split 6a/6b, separate commits, checkpoint B each [yes]. Q6 stale events
 left by an undone subscription event: document only vs list in FormatUndo vs auto re-queue [document only].
+
+As implemented (6a, implementer, 2026-11-12; not yet reviewed):
+- migrations/00006_undo.sql as planned (CHECK adds 'undone'; admin_actions_undo_once; lossy down). Applied to the dev DB.
+- changelog: Recorder gains source + actionID; NewUndo(inboxID, generation, actionID); SourceApply/SourceUndo constants.
+- internal/admin/undo.go: Undo, UndoRequest/Result, Conflict (kind, table, row, change_log id, inbox id, event, generation,
+  explanation), NormalizeUndoRequest, ErrNotUndoable, ErrConflict. Validation shared with replay (normalizeAudit; ErrInvalidInput
+  text is now "invalid admin request"). Flow as planned. Refinements: (1) rule 2 also requires PAIRING: a later apply entry counts
+  as undone only if its event's status is 'undone' AND a later undo row with the same (inbox_id, generation) exists on that row;
+  otherwise kind "unpaired" ("changed outside RelayGuard"). (2) Rules 3/4 compare against the after image of the LAST change_log
+  row on the row (any event, any source), else the event's own last entry; a later delete with the row still present is rule 3.
+  (3) Rule 5 uses a fixed referencedBy map (customers <- credit_grants.customer_id, subscriptions.customer_id), attributing each
+  referencing row to the apply that inserted it ("undo inbox #N first") or "changed outside RelayGuard". (4) A done event whose
+  apply rows include a delete is refused (the app never deletes). (5) Done audit detail {from_status, generation, changes};
+  refused detail {status, generation, refused, conflicts}. (6) Content compare (rule 4) is in Go (UseNumber, DeepEqual minus
+  row_version). (7) Q4 warning in UndoResult.Warnings for each deleted customer.
+- Preview refuses undone with new ErrUndone. Replay unchanged (already refuses: guard + allow-list). Worker unchanged.
+- CLI `admin undo <id> -actor -reason` (same flag rules as replay; undoReportable covers ErrNotUndoable and ErrConflict).
+- Lock risk RESULT: TestDBUndoCustomerWaitsForWorkerFK passed -count=20 with no 40P01/23503: the worker holding KEY SHARE upgrades
+  to NO KEY UPDATE ahead of the waiting FOR UPDATE, then commits; the undo then refuses with a conflict naming the invoice. The
+  fallback (NO KEY UPDATE + map 23503) was NOT applied.
+- Tests: 22 new DB tests (admin 18, dbtest 2: SchemaUndo, RecorderUndo; worker 2) + unit TestNormalizeUndoRequest,
+  TestUndoValidatesBeforeDB, TestUndoTablesConsistent, TestFormatUndo, TestUndoReportable, TestParseArgs/TestRunUsageError (undo).
+- Mutations (each applied by script, the named test failed, reverted): NewUndo generation+1 -> RecorderUndo; delete not recorded
+  and status not set to undone -> UndoCustomerCreated; credit_balance dropped from restoreColumns -> InvoicePaid + ColumnsMatchSchema;
+  rule 2 off -> ConflictLaterEvent; pairing off, rule 3 off, rule 1 off -> ConflictUnloggedWrite (one subtest each); rule 4 off ->
+  LogDisagreesWithRow; rule 5 off -> CustomerReferenced; allow-list + stale, + pending -> RefusesStatus; refusal not committed ->
+  RefusesStatus; undone guard off and inbox lock FOR KEY SHARE -> ConcurrentSecondIsRefused; no lock_timeout -> Busy; Outcome
+  before the audit insert -> RefusalAuditFailure; validation off -> ValidatesInput + UndoValidatesBeforeDB; preview undone check
+  off -> PreviewRefusesUndone; worker claims undone -> WorkerIgnoresUndoneEvent; FormatUndo drops conflicts -> FormatUndo;
+  undoReportable without ErrConflict -> UndoReportable; parseArgs rejects undo -> ParseArgs; delete lock FOR NO KEY UPDATE ->
+  UndoCustomerWaitsForWorkerFK (fails on "never waited"); forward revert order -> InvoicePaid; restore from the after image ->
+  LaterInvoiceAfterUndo; referencedBy without subscriptions -> ColumnsMatchSchema + CustomerReferenced; no-rows check off ->
+  NoChangeLogRows; not-found path changed -> NotFound. Replay allow-list + undone alone is NOT caught by ReplayRefusesRealUndo
+  (the admin_actions guard still refuses; two independent layers); with the guard also removed it fails.
+- Review round 1 fixes (2026-11-13):
+  - B1 chain rule (rule 3, chain part): rules 3/4 only compared the row to the LAST entry's after image, so an unlogged write
+    BETWEEN two logged changes survived (customer.created; invoice I1; outside UPDATE email; invoice I2; undo I2 restores the
+    outside email; undo I1 then passed and wiped it). Now every link from the event's own first entry on must match: each
+    entry's before image = the previous entry's after image (row_version and content), else changed_outside "changed outside
+    RelayGuard between change_log #a and #b". Own links included (cannot break today: the apply holds the row lock).
+    Regression subtests in ConflictUnloggedWrite (content write, and a no-op UPDATE that only bumps row_version); the content
+    subtest FAILED before the fix (undo done) and passes after.
+  - S1 UndoReplayedEvent: dead invoice -> real Replay -> done in generation 1; an older invoice is refused naming it with
+    generation 1; its undo rows and audit detail carry generation 1; then the older one undoes (pairing at generation 1).
+  - S2 lock order: reverse seq is deadlock-free only because every apply writes at most one pre-existing row (customer or
+    subscription) and writes it last; the other entries insert the event's own rows. Documented on Undo and pinned by
+    ApplyWritesExistingRowLast (all five handled event types). Chosen over locks sorted by (table rank, id): no code change, and
+    the test fails the moment a new event type breaks the assumption.
+  - S3 RevertRefusesStaleVersion: revert called directly with a stale rowState; UPDATE and DELETE both fail (wrapping
+    ErrNoRows), nothing recorded, nothing changed.
+  - Nits: Conflict.Generation is *int, omitted for references written outside RelayGuard; the delete-entry refusal names the
+    first one; 00006 Down comment notes the audit guard still blocks re-undo/replay after down/up.
+  - Mutations (each applied by script, named test failed, reverted): chain check off -> ConflictUnloggedWrite; chain compare
+    ignoring row_version -> ConflictUnloggedWrite (no-op subtest); NewUndo(req.InboxID, 0, actionID) -> UndoReplayedEvent;
+    pairing compares generation 0 -> UndoReplayedEvent; revert UPDATE without row_version guard and DELETE without it (each)
+    -> RevertRefusesStaleVersion; invoice.paid updating the customer before inserting the grant -> ApplyWritesExistingRowLast.
+    NOT caught: removing the break in the delete-entry loop (no test has two delete apply rows; the app never deletes).
+- Limitations: credit_grants.customer_id and subscriptions.customer_id have no index, so rule 5's reference check is a full
+  scan of each table while the customer row is held FOR UPDATE. Fine at this scale; an index would be needed for large tables.
+- Review round 2 follow-ups (2026-11-13):
+  - Chain breaks now have their own kind, ConflictChainBreak = "chain_break" (was ConflictVersion); FormatUndo prints the kind
+    generically, so no format change.
+  - New tests: TestDBUndoLaterInvoiceAfterUndo extended (undo inv2, then the customer: 0 customers, 0 grants, all undone) and
+    TestDBUndoSubscriptionChainAcrossUndoAndReplay (create, update, stale older event, undo update, real Replay applies at
+    generation 1, undo replayed, undo create: 0 subscriptions). Both passed first time; no bug found in the undo row -> later
+    apply link. ApplyWritesExistingRowLast lost a redundant loop.
+  - Mutations (applied by script, reverted): pairing never matches -> both new tests fail (plus 4 older); chain check skipped ->
+    only ConflictUnloggedWrite (the new tests are positive paths); chain compare ignoring updated_at on one side -> the new
+    subscription test fails (plus SubscriptionUpdateThenInsert). The customer-only extension is not caught by that one.
+  - Limitation: after a chain break the older event can never be undone; undoing the later events cannot repair the gap. This is
+    by design of the strict rule (the log no longer accounts for the row).
+  - Limitation: before/after images are compared as decoded JSON, so timestamps compare as text. That relies on every session
+    using the UTC time zone, pinned by SessionTimeZone and forceSessionTimeZone in internal/db/db.go (applied in Connect).
 
 ## Later steps (NOT now): 7 evidence.
 Constraints: cmd/naive unchanged; every behaviour change tested; each step its own commit (lead commits after user approval).

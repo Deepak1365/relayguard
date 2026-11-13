@@ -4,12 +4,14 @@
 //	admin log <inbox-id>       what did this event change, and what did admins do to it?
 //	admin replay <inbox-id> -actor <name> -reason "<text>"
 //	                           put a dead or stale event back in the queue (audited)
+//	admin undo <inbox-id> -actor <name> -reason "<text>"
+//	                           revert a done event's recorded changes (audited)
 //
 // Exit codes: 0 when the command completed (for preview: any outcome,
-// including "the apply would fail"; for replay: the replay was done), 1 when
-// it was refused or failed (done event, not replayable, busy rows, changed
-// meanwhile, not found, database error), 2 for usage errors (including a
-// missing or too long -actor / -reason).
+// including "the apply would fail"; for replay and undo: it was done), 1 when
+// it was refused or failed (done event, not replayable, not undoable,
+// conflicts, busy rows, changed meanwhile, not found, database error), 2 for
+// usage errors (including a missing or too long -actor / -reason).
 package main
 
 import (
@@ -31,26 +33,28 @@ const usage = `usage:
   admin preview <inbox-id>   show what applying the event now would change (rolled back, writes nothing)
   admin log <inbox-id>       show the event's change_log rows and admin actions
   admin replay <inbox-id> -actor <name> -reason "<text>"
-                             replay a dead or stale event (both flags required; audited)`
+                             replay a dead or stale event (both flags required; audited)
+  admin undo <inbox-id> -actor <name> -reason "<text>"
+                             undo a done event's changes, newest first (both flags required; audited)`
 
 // command is a parsed command line.
 type command struct {
-	name    string // preview, log or replay
+	name    string // preview, log, replay or undo
 	inboxID int64
-	actor   string // replay only, trimmed
-	reason  string // replay only, trimmed
+	actor   string // replay and undo only, trimmed
+	reason  string // replay and undo only, trimmed
 }
 
 // parseArgs validates the command line (os.Args[1:]). Pure, unit tested.
-// For replay it also applies admin.NormalizeReplayRequest, so a missing or
-// too long actor/reason is a usage error before settings or the database
-// are touched.
+// For replay and undo it also applies the admin package's validation, so a
+// missing or too long actor/reason is a usage error before settings or the
+// database are touched.
 func parseArgs(args []string) (command, error) {
 	if len(args) < 2 {
 		return command{}, errors.New("expected a command and an inbox id")
 	}
 	name := args[0]
-	if name != "preview" && name != "log" && name != "replay" {
+	if name != "preview" && name != "log" && name != "replay" && name != "undo" {
 		return command{}, fmt.Errorf("unknown command %q", name)
 	}
 	id, err := strconv.ParseInt(args[1], 10, 64)
@@ -58,24 +62,33 @@ func parseArgs(args []string) (command, error) {
 		return command{}, fmt.Errorf("inbox id must be a positive integer, got %q", args[1])
 	}
 	cmd := command{name: name, inboxID: id}
-	if name != "replay" {
+	if name != "replay" && name != "undo" {
 		if len(args) != 2 {
 			return command{}, fmt.Errorf("%s takes only an inbox id", name)
 		}
 		return cmd, nil
 	}
 
-	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+	// Same flags and rules for replay and undo: both write an audit row.
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // errors are returned and printed with the usage
-	actor := fs.String("actor", "", "who is replaying (required)")
+	actor := fs.String("actor", "", "who is doing it (required)")
 	reason := fs.String("reason", "", "why (required)")
 	if err := fs.Parse(args[2:]); err != nil {
-		return command{}, fmt.Errorf("replay: %w", err)
+		return command{}, fmt.Errorf("%s: %w", name, err)
 	}
 	if fs.NArg() != 0 {
-		return command{}, fmt.Errorf("replay: unexpected arguments %q (quote a reason that has spaces)", fs.Args())
+		return command{}, fmt.Errorf("%s: unexpected arguments %q (quote a reason that has spaces)", name, fs.Args())
 	}
-	req, err := admin.NormalizeReplayRequest(admin.ReplayRequest{InboxID: id, Actor: *actor, Reason: *reason})
+	if name == "replay" {
+		req, err := admin.NormalizeReplayRequest(admin.ReplayRequest{InboxID: id, Actor: *actor, Reason: *reason})
+		if err != nil {
+			return command{}, err
+		}
+		cmd.actor, cmd.reason = req.Actor, req.Reason
+		return cmd, nil
+	}
+	req, err := admin.NormalizeUndoRequest(admin.UndoRequest{InboxID: id, Actor: *actor, Reason: *reason})
 	if err != nil {
 		return command{}, err
 	}
@@ -89,6 +102,12 @@ func parseArgs(args []string) (command, error) {
 // action #0" would be false.
 func replayReportable(err error) bool {
 	return err == nil || errors.Is(err, admin.ErrNotReplayable)
+}
+
+// undoReportable is replayReportable for Undo: both refusal kinds
+// (not undoable, conflicts) are audited and committed before they return.
+func undoReportable(err error) bool {
+	return err == nil || errors.Is(err, admin.ErrNotUndoable) || errors.Is(err, admin.ErrConflict)
 }
 
 func main() {
@@ -145,6 +164,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		if err != nil {
 			fmt.Fprintf(stderr, "admin: replay refused or failed: %v\n", err)
+			return 1
+		}
+	case "undo":
+		res, err := admin.Undo(ctx, pool,
+			admin.UndoRequest{InboxID: cmd.inboxID, Actor: cmd.actor, Reason: cmd.reason}, admin.Options{})
+		if undoReportable(err) {
+			// Done or refused-and-audited: an audit row exists; show it.
+			fmt.Fprint(stdout, admin.FormatUndo(res))
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "admin: undo refused or failed: %v\n", err)
 			return 1
 		}
 	}

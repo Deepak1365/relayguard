@@ -27,7 +27,10 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
   - [x] Step 5a: migration 00005 (replay_count, CHECKs), fence token (replay_count, attempts), claim/fence FOR NO KEY UPDATE, generation-aware checker
         (review fixes: preview re-reads status+replay_count at the end and after a failed apply -> ErrChanged)
   - [x] Step 5b: admin replay (dead/stale only, audited, -actor/-reason required, undone guard)
-  - [ ] Step 6: undo with conflict explanations
+  - [ ] Step 6: undo with conflict explanations (plan approved 2026-11-12: rule B, migration 00006, Q1-Q6 in the plan)
+    - [x] 6a: migration 00006 (undone status, undo-once index), admin undo with rule-B conflicts incl. chain check,
+          FormatUndo, CLI `admin undo`, preview refuses undone (2 review rounds; review found the unlogged-write chain hole)
+    - [ ] 6b: harness checker for undo rows (checkUndoRows, changelog_bad_undo) + negative controls
   - [ ] Step 7: evidence runs from a clean tree, docs/phase6-results.md, decision records
 
 ## Phase 7: dashboard
