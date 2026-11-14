@@ -66,8 +66,13 @@ func WaitIdle(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration) (m
 // CheckState compares app tables with exp. Rows not belonging to this seed's
 // history (for example real Stripe test events) are counted and ignored.
 func CheckState(ctx context.Context, pool *pgxpool.Pool, seed int64, exp Expected) ([]Violation, int, error) {
-	cusPrefix := fmt.Sprintf("cus_s%d_", seed)
-	subPrefix := fmt.Sprintf("sub_s%d_", seed)
+	return checkState(ctx, pool, seedScope(seed), exp)
+}
+
+// checkState is CheckState for any scope (only its customer and subscription
+// prefixes are used), so UndoAll's DB tests can run it on dbtest ids.
+func checkState(ctx context.Context, pool *pgxpool.Pool, sc changeLogScope, exp Expected) ([]Violation, int, error) {
+	cusPrefix, subPrefix := sc.customers, sc.subscriptions
 	var v []Violation
 	foreign := 0
 

@@ -35,13 +35,20 @@ a deliberately naive baseline. Honest evidence matters more than features.
 ## Status
 Phases 1-5 complete and pushed (baseline, inbox + transactional worker, ordering, chaos harness with
 crashes, claim with lease + poison dead-lettering). Phase 6 steps 1-5b pushed (fe27b99, d2e3cf3, b56731c, 052c0f5,
-425f62d, dcde809), plus 9959dce (agent model tiers + token discipline). 370f3eb (handoff hook, step 6 plan) is
-committed locally, NOT pushed: push it together with 6a after the user's OK.
+425f62d, dcde809), plus 9959dce (agent model tiers + token discipline). Step 6 pushed: 370f3eb, 14ae77f, b4c9405.
 Step 6 (undo) plan APPROVED 2026-11-12 (Q1-Q6 = planner defaults, recorded in docs/phase6-plan.md).
 
-Update (2026-11-13): step 6a (undo) committed as 14ae77f; step 6b (checker for undo rows) committed after it.
-Push 370f3eb + 14ae77f + 6b together after the user's OK (user chose to push with 6b). Next: step 7 (evidence), which
-needs the user's approval; ask about the optional E4 (undo-all) and E5 (naive rerun) experiments then.
+Handoff (2026-11-13): Phase 6 step 6 DONE and pushed: 370f3eb (hook + plan), 14ae77f (6a undo), b4c9405 (6b checker);
+main level with origin. This Status edit is committed with 7a (step 7's first commit).
+- Step 7 plan APPROVED 2026-11-13 (all defaults; E4 and E5 INCLUDED; full plan in docs/phase6-plan.md "## Step 7").
+  7a (chaos -undo-all newest|random, internal/sim/undoall.go) done: 2 review rounds + nits, APPROVED; 146 top-level DB
+  tests; mutations in the plan. Smoke7a (scratchpad, not evidence): crash 1-3, poison 1-2 (dead=2), both also with
+  -undo-all newest (0 refusals), random seed 1 (refusals=39, passes=3), all 0 violations. Next: 7b evidence from a clean
+  tree, 7c decision records 0001-0005, 7d interview notes. Results docs comparing relayguard vs naive must say relayguard runs carry
+  extra changelog_* checks. Evidence only from a clean tree (git status empty, so vcs.modified=false). Then interview notes
+  for Phase 6 steps 1-6 (lessons listed below, plus 6a/6b: chain check found by review; audit row vs data consistency;
+  checker must not panic on corrupt state; single-snapshot reads).
+- Known, not a bug: the done/stale split varies run to run under crashes (docs/phase5-results.md:739).
 - 6b: internal/sim/changelog_undo_check.go (checkUndoRows: presence -> changelog_missing/unexpected, incl. a done undo
   audit row with nothing reverted; action link, generation, pairing k<->n+1-k, restore -> changelog_bad_undo; one
   violation per event, first failing rule; both reads in one REPEATABLE READ READ ONLY tx). compareApplyRows treats

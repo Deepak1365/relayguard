@@ -35,13 +35,16 @@ import (
 const workerMaxAttempts = 8
 
 type runResult struct {
-	seed       int64
-	events     int
-	deliveries int
-	stats      sim.DeliveryStats
-	inbox      map[string]int
-	violations []sim.Violation
-	elapsed    time.Duration
+	seed        int64
+	events      int
+	deliveries  int
+	stats       sim.DeliveryStats
+	inbox       map[string]int
+	violations  []sim.Violation
+	elapsed     time.Duration
+	undo        *sim.UndoReport // nil unless -undo-all
+	undoViol    int             // violations found by the undo phase (included in violations)
+	undoSkipped bool            // -undo-all set, but skipped: events still pending (undo_skipped)
 }
 
 func main() {
@@ -65,6 +68,8 @@ func main() {
 	verbose := flag.Bool("v", false, "print violation examples for every failing seed")
 	changeLogCheck := flag.Bool("changelog-check", true,
 		"check change_log completeness and consistency (relayguard only); set false for workers built before phase 6, e.g. bin/worker-phase4.exe, which write no change_log")
+	undoAll := flag.String("undo-all", "",
+		"after each seed's forward checks, undo every done event with admin undo and check that nothing is left: newest or random (relayguard, needs -supervise)")
 	flag.Parse()
 
 	if *target != "relayguard" && *target != "naive" {
@@ -75,6 +80,9 @@ func main() {
 	}
 	if *poison > 0 && *target != "relayguard" {
 		log.Fatal("-poison only applies to -target relayguard")
+	}
+	if err := validateUndoAll(*undoAll, *target, *changeLogCheck, *supervise); err != nil {
+		log.Fatal(err)
 	}
 	seeds, err := parseSeeds(*seedsFlag, *seed)
 	if err != nil {
@@ -132,10 +140,13 @@ func main() {
 	fmt.Printf("target=%s seeds=%d-%d customers=%d dup=%.2f reorder=%d poison=%d crash-rate=%.2f kill-interval=%s supervise=%q\n",
 		*target, seeds[0], seeds[len(seeds)-1], *customers, *dup, *reorder, *poison, *crashRate, *killInterval, *supervise)
 	fmt.Println(strings.TrimPrefix(changeLogCheckLine(*target, *changeLogCheck), "- "))
+	if *undoAll != "" {
+		fmt.Println(strings.TrimPrefix(undoAllLine(*undoAll), "- "))
+	}
 
 	var results []runResult
 	for _, s := range seeds {
-		r, err := runOne(ctx, pool, sender, *target, s, cfg, opts, *providerRetries, *timeout, *changeLogCheck)
+		r, err := runOne(ctx, pool, sender, *target, s, cfg, opts, *providerRetries, *timeout, *changeLogCheck, *undoAll)
 		if err != nil {
 			log.Print(err)
 			exit(2)
@@ -148,16 +159,29 @@ func main() {
 	if sup != nil {
 		restarts, kills = sup.Restarts(), sup.Kills()
 	}
-	failing, total := 0, 0
+	failing, total, undone, undoRefusals, undoSkipped := 0, 0, 0, 0, 0
 	for _, r := range results {
 		total += len(r.violations)
 		if len(r.violations) > 0 {
 			failing++
 		}
+		if r.undo != nil {
+			undone += r.undo.Undone
+			undoRefusals += r.undo.Refusals
+		}
+		if r.undoSkipped {
+			undoSkipped++
+		}
 	}
 	fmt.Println("---")
-	fmt.Printf("RESULT target=%s seeds=%d failing_seeds=%d violations=%d restarts=%d hard_kills=%d\n",
-		*target, len(results), failing, total, restarts, kills)
+	// The undo fields appear only for -undo-all runs, so RESULT lines of
+	// other runs keep the format earlier results files quote.
+	undoResult := ""
+	if *undoAll != "" {
+		undoResult = undoResultFields(undone, undoRefusals, undoSkipped)
+	}
+	fmt.Printf("RESULT target=%s seeds=%d failing_seeds=%d violations=%d restarts=%d hard_kills=%d%s\n",
+		*target, len(results), failing, total, restarts, kills, undoResult)
 
 	if *out != "" {
 		// -lease only reaches a worker the harness starts itself; with an
@@ -171,10 +195,13 @@ func main() {
 			fmt.Sprintf("%s, poison events per seed: %d", leaseLine, *poison),
 			changeLogCheckLine(*target, *changeLogCheck),
 		}
+		if *undoAll != "" {
+			meta = append(meta, undoAllLine(*undoAll))
+		}
 		if *supervise != "" {
 			meta = append(meta, "- Worker binary: "+binaryBuildInfo(*supervise))
 		}
-		if err := writeMarkdown(*out, *target, meta, results, failing, total, restarts, kills); err != nil {
+		if err := writeMarkdown(*out, *target, meta, results, failing, total, restarts, kills, *undoAll != ""); err != nil {
 			log.Printf("writing %s: %v", *out, err)
 		} else {
 			fmt.Printf("wrote %s\n", *out)
@@ -187,7 +214,7 @@ func main() {
 }
 
 func runOne(ctx context.Context, pool *pgxpool.Pool, sender *sim.Sender, target string, seed int64,
-	cfg sim.Config, opts sim.ChaosOptions, retries int, timeout time.Duration, changeLogCheck bool) (runResult, error) {
+	cfg sim.Config, opts sim.ChaosOptions, retries int, timeout time.Duration, changeLogCheck bool, undoAll string) (runResult, error) {
 
 	events := sim.Generate(seed, cfg)
 	exp := sim.Model(events)
@@ -269,8 +296,91 @@ func runOne(ctx context.Context, pool *pgxpool.Pool, sender *sim.Sender, target 
 		return r, fmt.Errorf("check: %w", err)
 	}
 	r.violations = append(v, extra...)
+
+	// Undo-all (experiment E4) runs after the forward checks, on the same
+	// database, even if they found violations: its undo_* kinds keep the two
+	// apart. It assumes an idle worker. WaitIdle does not guarantee that: on
+	// timeout it returns with events still pending, which the supervised
+	// worker may still be applying. Then the phase is skipped and the seed
+	// fails with undo_skipped, rather than undoing a moving target.
+	if skip, ok := undoAllSkip(undoAll, r.inbox); ok {
+		r.undoSkipped = true
+		r.undoViol = 1
+		r.violations = append(r.violations, skip)
+	} else if undoAll != "" {
+		rep, uv, err := sim.UndoAll(ctx, pool, seed, undoAll)
+		if err != nil {
+			return r, fmt.Errorf("undo-all: %w", err)
+		}
+		r.undo, r.undoViol = &rep, len(uv)
+		r.violations = append(r.violations, uv...)
+	}
 	r.elapsed = time.Since(start)
 	return r, nil
+}
+
+// validateUndoAll rejects -undo-all where its result could not mean what it
+// claims: the naive receiver writes no change_log to undo from; with the
+// change_log check off, the run would say "check off" while the undo phase
+// asserts "changelog 0"; and without -supervise the harness cannot vouch for
+// which worker produced the state being undone (and it relies on the worker
+// having drained the inbox, which WaitIdle only checks for relayguard).
+func validateUndoAll(mode, target string, changeLogCheck bool, supervise string) error {
+	switch {
+	case mode == "":
+		return nil
+	case mode != sim.UndoAllNewest && mode != sim.UndoAllRandom:
+		return fmt.Errorf("-undo-all must be %s or %s, got %q", sim.UndoAllNewest, sim.UndoAllRandom, mode)
+	case target != "relayguard":
+		return fmt.Errorf("-undo-all only applies to -target relayguard (the naive receiver writes no change_log)")
+	case !changeLogCheck:
+		return fmt.Errorf("-undo-all needs the change_log check: drop -changelog-check=false")
+	case supervise == "":
+		return fmt.Errorf("-undo-all needs -supervise")
+	}
+	return nil
+}
+
+// undoAllSkip says whether a seed's undo phase must be skipped: it needs the
+// worker idle, and pending events after WaitIdle (a timeout) mean it may not
+// be. The returned violation makes the seed fail, so a skipped phase can
+// never read as a passed one.
+func undoAllSkip(mode string, inbox map[string]int) (sim.Violation, bool) {
+	if mode == "" || inbox["pending"] == 0 {
+		return sim.Violation{}, false
+	}
+	return sim.Violation{Kind: sim.KindUndoSkipped, Subject: "inbox",
+		Detail: fmt.Sprintf("undo-all %s not run: %d events still pending after the wait, so the worker may still be applying events", mode, inbox["pending"])}, true
+}
+
+// undoAllLine is the header line for -undo-all runs, saying what the undo
+// phase asserts, so "0 violations" cannot be read as covering less, and what
+// the refusal counts count.
+func undoAllLine(mode string) string {
+	return fmt.Sprintf("- Undo-all: %s (after forward checks; asserts empty tables, all undone, changelog 0, probes refused; "+
+		"undo_refusals and Refusals count refusals in the undo loop only, not the probes' expected refusals)", mode)
+}
+
+// undoResultFields is the -undo-all suffix of the RESULT line. undo_skipped
+// is there so a run whose undo phase never ran cannot read as a quiet success
+// from undone alone (a skipped seed adds 0 to it).
+func undoResultFields(undone, refusals, skipped int) string {
+	return fmt.Sprintf(" undone=%d undo_refusals=%d undo_skipped=%d", undone, refusals, skipped)
+}
+
+// undoSkippedLine is the console line for a seed whose undo phase was skipped.
+func undoSkippedLine() string {
+	return "undo: skipped (events still pending; see undo_skipped) undone=0"
+}
+
+// undoLine is the console summary of one seed's undo phase.
+func undoLine(r *sim.UndoReport, violations int) string {
+	kinds := ""
+	if len(r.RefusalKinds) > 0 {
+		kinds = " " + formatCounts(r.RefusalKinds)
+	}
+	return fmt.Sprintf("undo: mode=%s undone=%d refusals=%d%s passes=%d probes=%d violations=%d",
+		r.Mode, r.Undone, r.Refusals, kinds, r.Passes, r.Probes, violations)
 }
 
 // changeLogCheckLine says whether the change_log check ran, for the console
@@ -295,6 +405,12 @@ func printRun(r runResult, examples bool) {
 	fmt.Printf("seed=%-4d events=%-4d deliveries=%-4d provider_retries=%-3d gave_up=%-3d%s violations=%d (%s)\n",
 		r.seed, r.events, r.deliveries, r.stats.ProviderRetries, r.stats.GaveUp, inbox,
 		len(r.violations), r.elapsed.Round(time.Millisecond))
+	if r.undo != nil {
+		fmt.Printf("    %s\n", undoLine(r.undo, r.undoViol))
+	}
+	if r.undoSkipped {
+		fmt.Printf("    %s\n", undoSkippedLine())
+	}
 	if examples && len(r.violations) > 0 {
 		fmt.Printf("    kinds: %s\n", kindsSummary(r.violations))
 		for i, v := range r.violations {
@@ -309,7 +425,7 @@ func printRun(r runResult, examples bool) {
 
 // writeMarkdown writes a results file. meta holds extra header lines
 // (each starting with "- "), placed after the command line.
-func writeMarkdown(path, target string, meta []string, results []runResult, failing, total, restarts, kills int) error {
+func writeMarkdown(path, target string, meta []string, results []runResult, failing, total, restarts, kills int, undo bool) error {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -326,21 +442,45 @@ func writeMarkdown(path, target string, meta []string, results []runResult, fail
 	fmt.Fprintf(&b, "- Data: synthetic seeded histories on a local machine (not production traffic)\n\n")
 	fmt.Fprintf(&b, "**Seeds: %d, failing seeds: %d, violations: %d, process restarts: %d (of which hard kills: %d)**\n\n",
 		len(results), failing, total, restarts, kills)
-	b.WriteString("| Seed | Events | Deliveries | Provider retries | Gave up | Inbox | Violations | Kinds |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|\n")
+	b.WriteString(tableHeader(undo))
 	for _, r := range results {
-		inbox := "-"
-		if r.inbox != nil {
-			inbox = formatCounts(r.inbox)
-		}
-		kinds := "-"
-		if len(r.violations) > 0 {
-			kinds = kindsSummary(r.violations)
-		}
-		fmt.Fprintf(&b, "| %d | %d | %d | %d | %d | %s | %d | %s |\n",
-			r.seed, r.events, r.deliveries, r.stats.ProviderRetries, r.stats.GaveUp, inbox, len(r.violations), kinds)
+		b.WriteString(tableRow(r, undo))
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// tableHeader is the results table header. The undo columns exist only for
+// -undo-all runs, so files of other runs keep their established format.
+func tableHeader(undo bool) string {
+	if undo {
+		return "| Seed | Events | Deliveries | Provider retries | Gave up | Inbox | Undone | Refusals | Passes | Violations | Kinds |\n" +
+			"|---|---|---|---|---|---|---|---|---|---|---|\n"
+	}
+	return "| Seed | Events | Deliveries | Provider retries | Gave up | Inbox | Violations | Kinds |\n" +
+		"|---|---|---|---|---|---|---|---|\n"
+}
+
+func tableRow(r runResult, undo bool) string {
+	inbox := "-"
+	if r.inbox != nil {
+		inbox = formatCounts(r.inbox)
+	}
+	kinds := "-"
+	if len(r.violations) > 0 {
+		kinds = kindsSummary(r.violations)
+	}
+	undoCols := ""
+	if undo {
+		undoCols = "- | - | - | "
+		if r.undoSkipped {
+			undoCols = "skipped | - | - | "
+		}
+		if r.undo != nil {
+			undoCols = fmt.Sprintf("%d | %d | %d | ", r.undo.Undone, r.undo.Refusals, r.undo.Passes)
+		}
+	}
+	return fmt.Sprintf("| %d | %d | %d | %d | %d | %s | %s%d | %s |\n",
+		r.seed, r.events, r.deliveries, r.stats.ProviderRetries, r.stats.GaveUp, inbox, undoCols, len(r.violations), kinds)
 }
 
 func parseSeeds(spec string, single int64) ([]int64, error) {

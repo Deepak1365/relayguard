@@ -479,5 +479,152 @@ As implemented (6b, implementer, 2026-11-13; not yet reviewed):
 - Known limit, not checked: undo row ids increasing with seq (no correctness impact; chains already order by id).
 - Not added (by scope): chaos -undo-all (E4, undecided).
 
-## Later steps (NOT now): 7 evidence.
-Constraints: cmd/naive unchanged; every behaviour change tested; each step its own commit (lead commits after user approval).
+## Step 7: E4 undo-all, E5 naive rerun, evidence, decision records — APPROVED by the user 2026-11-13 (all defaults)
+User decisions: E4 included (newest + random variants), E5 included. Open questions all at planner defaults: seeds
+R1/R2/E4a/E4b/E4c/E5 = 20/5/20/20/5/20; R1/R2 stay plain forward runs; -undo-all requires -supervise; decision records
+Phase 6 only (backfill 1-5 later); results files results/phase6-* (never overwrite Phase 4/5 files); ask before each push.
+Constraints: cmd/naive unchanged; every behaviour change tested; each sub-step its own commit (lead commits after user approval).
+
+### 7a: E4 harness code (implementer Opus, reviewer, checkpoint B; CLAUDE.md Status edit goes in this commit)
+Files: new internal/sim/undoall.go, undoall_test.go (unit), undoall_db_test.go; cmd/chaos/main.go + main_test.go. No migration.
+UndoAll(ctx, pool, scope, mode, rng) -> (UndoReport, []Violation, error):
+- Runs after the seed's forward checks (incl. CheckState vs model), same DB, before the next seed's Reset; runs even if forward
+  checks found violations; own kinds undo_*. Supervised worker stays up idle (WaitIdle => pending=0); no new deliveries.
+- Candidates: all done inbox rows of this seed.
+- newest: order by the event's max current-generation apply change_log.id DESC (apply order, not created; differs under
+  -reorder). Any refusal -> undo_refused_newest_first (with conflicts). Rule B guarantees success in this order.
+- random: sort by event_id, shuffle with rand.New(rand.NewSource(seed)); passes over the remaining set: done removes,
+  ErrConflict keeps + counts per kind. Pass without progress -> undo_stuck (lists remaining), stop; cap n+1 passes.
+  Allowed kinds only later_event, referenced; any other -> undo_unexpected_conflict. ErrBusy/ErrNotUndoable/other -> undo_error.
+  Progress argument: the remaining event with the largest apply id is always undoable.
+- Probes after the loop: every undone event: second Undo -> ErrNotUndoable, Replay -> ErrNotReplayable; every stale/skipped/
+  dead event: Undo -> ErrNotUndoable (no Replay probe: dead/stale are replayable by design). Mismatch -> undo_probe.
+- Assertions (after probes): inbox done=0, undone = pre-phase done count, stale/skipped/dead unchanged; count(*)=0 on
+  customers, credit_grants, subscriptions (undo_rows_left) plus CheckState with empty Expected; CheckChangeLog(seed) = 0;
+  admin_actions: exactly one done undo per undone event; refused undo audit rows = counted refusals + probes.
+- Report: console "undo: mode=X undone=N refusals=M [kind=count ...] passes=P probes=K violations=V"; RESULT gains undone=,
+  undo_refusals=; markdown header line "- Undo-all: <mode> (after forward checks; asserts empty tables, all undone,
+  changelog 0, probes refused)" and Undone/Refusals/Passes columns only when the flag is set.
+- Flags: -undo-all ""|newest|random; rejected with -target naive, with -changelog-check=false, and without -supervise.
+- Pass loop is a pure function over try func(id) (outcome, kinds, err) for unit tests.
+Tests: unit (progress, stuck, disallowed kind, ErrBusy, pass cap, newest order by apply id not created, deterministic
+shuffle; flag validation, header line). DB positive: TestDBUndoAllNewestClean (undoneHistory + 2 invoices applied in
+reverse created order + stale subscription + dead event; 0 violations, 0 refusals, empty, probes refused);
+TestDBUndoAllRandomRetries (seed whose shuffle puts customer.created first; refusals > 0, only allowed kinds, 0 violations).
+DB negative controls, exact kinds: outside UPDATE customers between two invoices -> undo_unexpected_conflict(chain_break) +
+undo_stuck + undo_rows_left; foreign customer row -> undo_rows_left via count (CheckState skips it); newest with reversed
+order hook -> undo_refused_newest_first; status forced back to done -> undo_probe + inbox count failure.
+Mutations: order by created; allow all kinds; drop count(*); skip probes; don't count refusals; no stuck detection;
+CheckChangeLog not called after undo; min instead of max apply id (expected equivalent, record as such).
+Regression (scratchpad): test, db-test, crash 1-3 and poison 1-2 (dead=2) with and without -undo-all newest, random on seed 1.
+
+7a implementation notes (implementer, 2026-11-13):
+- Choices where the spec was silent: extra kinds undo_inbox_counts, undo_audit, undo_pass_cap (cap separate from undo_stuck,
+  so losing stuck detection cannot hide behind the cap). CheckState(empty) violations are reported as undo_rows_left (detail
+  keeps the original kind); CheckChangeLog after undo keeps its kinds with an undo_ prefix (undo_changelog_chain_break), so
+  results tell forward from post-undo. Probes also check the refusal came from the right status (Undo res.Status,
+  Replay FromStatus): without that, the forced-done control cannot fail (the done undo audit row alone refuses both).
+  Pre-phase undone events are probed too and counted in the inbox check (undone_after = undone_before + done_before); audit
+  checks are deltas against a pre-phase snapshot (refused undo = loop refusals + refused undo probes, refused replay =
+  refused replay probes, no new done replay, exactly one done undo per undone event). ErrNotUndoable on a done event counts
+  as a refusal (it is audited); in newest mode it is undo_refused_newest_first, in random undo_error (dropped from the set).
+  An undo_unexpected_conflict is reported once per event and kind, the event stays in the set. Actor "chaos-undo-all".
+  CheckState gained an internal checkState(scope) so the DB tests can use dbtest ids. Newest ordering is done in Go
+  (sortNewest), so it is unit-testable.
+- Controls show more kinds than the plan listed, all correct: chain-break control = undo_unexpected_conflict (a_cus AND
+  a_inv1: the customer's own undo reads the same broken chain) + undo_stuck + undo_rows_left + undo_inbox_counts +
+  undo_changelog_chain_break; wrong-order control = undo_refused_newest_first (a_cus, a_sub_c) + undo_rows_left +
+  undo_inbox_counts; forced-done control = undo_probe (x2, undo and replay probe) + undo_inbox_counts +
+  undo_changelog_unexpected; foreign row = undo_rows_left (subject customers) only.
+- Mutations (each applied alone, named tests run, file restored byte-identical):
+  | Mutation | Result | Failing tests |
+  |---|---|---|
+  | order by created | caught | TestSortNewestByApplyIDNotCreated, TestDBUndoAllNewestClean |
+  | allow all conflict kinds | caught | TestUndoLoopRandomDisallowedKind, TestDBUndoAllControlChainBreak |
+  | drop count(*) | caught | TestDBUndoAllControlForeignRow |
+  | skip probes | caught | TestDBUndoAllNewestClean, TestDBUndoAllControlForcedDone |
+  | don't count refusals | caught | TestDBUndoAllRandomRetries, TestUndoLoopRandomMakesProgress |
+  | no stuck detection | caught | TestUndoLoopRandomStuck, TestDBUndoAllControlChainBreak (undo_pass_cap instead) |
+  | CheckChangeLog not called after undo | caught | TestDBUndoAllControlChainBreak, TestDBUndoAllControlForcedDone |
+  | min instead of max apply id | equivalent (as expected) | NewestClean, RandomRetries, ControlNewestWrongOrder all pass |
+- Tests: dev.ps1 test ok; dev.ps1 db-test 138 top-level tests pass (was 124; +8 sim unit, +6 sim DB); cmd/chaos +4 unit.
+- 7a review round 1 fixes (2026-11-13):
+  - B1: checkUndoAudit had no control. New DB controls (afterLoop hook): extra undo/refused row by an outsider ->
+    exactly {undo_audit} on admin_actions (TestDBUndoAllControlAuditExtraRefusal); stray undo/done row for the stale
+    event -> exactly {undo_audit (admin_actions + the stale event), undo_changelog_missing (done undo action, no undo
+    rows)} (TestDBUndoAllControlAuditStrayDoneUndo). The literal "second done undo row for an undone event" cannot be
+    written: admin_actions_undo_once refuses it; the control asserts that refusal first, then uses the stale event.
+  - Audit totals now compare EVERY (action, outcome) key (auditDeltaViolations): any key the phase does not write must
+    not change. The schema CHECKs make another key impossible today, so this rule is unit tested only
+    (TestAuditDeltaViolations).
+  - S1: WaitIdle timeout (pending > 0) skips the undo phase: one undo_skipped violation naming the pending count, table
+    shows "skipped", console "undo: skipped ... undone=0", RESULT undone sums only seeds that ran (undoAllSkip,
+    TestUndoAllSkip, TestUndoSkippedDisplay).
+  - S2: TestDBUndoAllReplayedGeneration1 (dead -> admin.Replay -> applied at generation 1 -> newest): ApplyID = the
+    generation-1 max, undone first, undo rows at generation 1, 0 violations. The generation filter in readUndoPhase is
+    defensive: chaos never replays, and a replayed dead/stale event has no generation-0 apply rows, so the filter gives
+    the same result in every state E4 can reach. E4 results must not claim to have tested it.
+  - S3: classifyUndo/probeFatal: a cancelled context, or an error that is not an admin sentinel (ErrConflict,
+    ErrNotUndoable, ErrBusy, ErrNotFound, ErrNotReplayable), aborts the phase with an error (chaos exits 2) instead of
+    becoming undo_error/undo_probe. This narrows the spec's "other -> undo_error" to admin's sentinels; ErrBusy stays
+    undo_error per the spec. Tests: TestUndoLoopFatalStops, TestClassifyUndo, TestProbeFatal.
+  - NIT: header line says undo_refusals/Refusals count loop refusals only, not the probes' expected refusals.
+  - Mutations (round 1), each alone, named tests, file restored byte-identical:
+    | Mutation | Result | Failing tests |
+    |---|---|---|
+    | drop the checkUndoAudit call | caught | TestDBUndoAllControlAuditExtraRefusal, TestDBUndoAllControlAuditStrayDoneUndo |
+    | audit delta over expected keys only | caught | TestAuditDeltaViolations |
+    | unknown error -> undo_error (old behaviour) | caught | TestClassifyUndo |
+    | no ctx check in classifyUndo | caught | TestClassifyUndo |
+    | no ctx check in probeFatal | caught | TestProbeFatal |
+    | loop ignores attemptFatal (random / newest) | caught | TestUndoLoopFatalStops/random, /newest |
+    | undoAllSkip never skips | caught | TestUndoAllSkip, TestUndoSkippedDisplay |
+    | re-run: skip probes; don't count refusals; no stuck detection | caught (same tests as before) | as in the table above |
+  - Tests after round 1: go vet ok; dev.ps1 test ok; dev.ps1 db-test 145 top-level tests pass (+4 sim unit, +3 sim DB);
+    cmd/chaos +2 unit; dev.ps1 build ok.
+- 7a review round 2 nits (2026-11-13):
+  - N1: "too few" direction of the per-event audit rule had no control (n > want left all tests green). New
+    TestDBUndoAllControlAuditMissingDoneUndo: after the loop sub_u's done undo row is set to 'refused'. Exact kinds:
+    undo_audit x3 (sub_u "0 done undo audit row(s), want 1"; admin_actions "3 new 'undo done', want 4"; admin_actions
+    "7 new 'undo refused', want 6") + undo_changelog_unexpected (sub_u: undo rows but no done undo action).
+  - N2: mutations, each alone, file restored byte-identical (sha256 checked); run over TestDBUndoAll* + TestAuditDelta*:
+    | Mutation | Result | Failing tests |
+    |---|---|---|
+    | per-event `n != want` -> `n > want` | caught | TestDBUndoAllControlAuditMissingDoneUndo |
+    | drop the per-event rule only | caught | TestDBUndoAllControlAuditStrayDoneUndo (subject assertion), TestDBUndoAllControlAuditMissingDoneUndo |
+    | drop the totals rule only | caught | TestDBUndoAllControlAuditExtraRefusal, TestDBUndoAllControlAuditStrayDoneUndo, TestDBUndoAllControlAuditMissingDoneUndo |
+    (Totals-drop is also caught by StrayDoneUndo and MissingDoneUndo, which assert the admin_actions subjects.)
+  - N3: RESULT line of -undo-all runs now ends " undone=N undo_refusals=N undo_skipped=N" (seeds whose undo phase was
+    skipped); runs without the flag are unchanged. undoResultFields, TestUndoResultFields.
+
+### 7b: evidence (experiment-runner, reviewer on doc, checkpoint B)
+Procedure: commit 7a; git status --porcelain empty (incl. untracked); no agents/processes running; migrate-status shows
+00006; dev.ps1 build; go version -m shows vcs.modified=false for worker/naive; test + db-test (scratchpad); reset-data; lead
+starts the RelayGuard receiver. Raw output to scratchpad, only tail/RESULT shown.
+RelayGuard common flags: -dup 0.2 -reorder 10 -supervise bin/worker.exe -crash-rate 0.1 -kill-interval 2s -lease 1s
+- R1 seeds 1-20 -> results/phase6-relayguard-crash.md
+- R2 -poison 2, seeds 1-5 -> results/phase6-relayguard-poison.md
+- E4a -undo-all newest, 1-20 -> results/phase6-undo-all-newest.md
+- E4b -undo-all random, 1-20 -> results/phase6-undo-all-random.md
+- E4c -poison 2 -undo-all newest, 1-5 -> results/phase6-undo-all-poison.md
+- E5 (stop RelayGuard receiver first): -target naive -seeds 1-20 -dup 0.2 -reorder 10 -supervise bin/naive.exe
+  -crash-rate 0.1 -kill-interval 2s -out results/phase6-naive-crash.md
+Compat (worker-phase4) is regression only, not evidence. Then stop receiver, reset-data.
+docs/phase6-results.md: commit, vcs lines, migrate-status; per experiment date, command, RESULT verbatim, link; relayguard vs
+naive table noting relayguard's extra changelog_* checks and -lease 1s; E4 refusal counts verbatim (vary run to run, like
+done/stale split); state that Phase 5 evidence was vcs.modified=true and this is the first clean-build evidence;
+limitations (undo not crash-injected, not concurrent with live processing; undo-all is a property check; the whole-table
+count(*) check assumes no real Stripe events arrive during a seed; E4 does not exercise replayed (generation >= 1)
+candidates). Superseded runs
+kept and labelled. Re-runs after a fix need a new commit and a clean tree.
+
+### 7c: decision records (docs/decisions/, template 0000)
+0001 change_log in the same tx + before/after images + row_version trigger; 0002 replay_count as fence generation (ABA);
+0003 undo rule B + chain check (vs rule A, vs compensating events); 0004 audited refusals, outcome only after audit commit;
+0005 preview = real handler + rollback. Tick ROADMAP step 7, update Status. Commit at checkpoint B.
+
+### 7d: interview-coach pass on Phase 6 lessons (steps 1-7).
+
+Acceptance: 7a tests pass, each control shows its exact kind, mutations recorded here, reviewer approved. 7b every results
+file vcs.modified=false; numbers reported as they come; E4a 0 refusals; E4b refusals verbatim; reviewer checked doc vs raw.
+Risks: naive on the 00004-00006 schema (report, never fix naive); E4b runtime unmeasured.
