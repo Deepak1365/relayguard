@@ -19,7 +19,8 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 - Replay: re-queue a dead or stale event deliberately (audited).
 - Undo: reverse an applied event only if the affected rows are unchanged since (row versions); otherwise refuse with a conflict explanation.
 - Acceptance: unit/integration tests for preview, replay, undo-success and undo-conflict; chaos regression still 0 violations; results doc.
-- Status: IN PROGRESS. Approved plan: docs/phase6-plan.md (7 steps, one commit each).
+- Status: DONE (2026-11-18). Approved plan: docs/phase6-plan.md (7 steps, one commit each). Evidence:
+  docs/phase6-results.md, results/phase6-*.md; decisions: docs/decisions/0001-0005.
   - [x] Step 1: migration 00004 (change_log, admin_actions, row_version trigger), TRUNCATE sites, internal/dbtest (fe27b99)
   - [x] Step 2: change capture in internal/app + worker, subprocess crash test (review fix: FOR NO KEY UPDATE pre-reads)
   - [x] Step 3: CheckChangeLog in the harness + negative controls (incl. per-rule attribution controls, -changelog-check flag)
@@ -32,11 +33,11 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
           FormatUndo, CLI `admin undo`, preview refuses undone (2 review rounds; review found the unlogged-write chain hole)
     - [x] 6b: harness checker for undo rows (checkUndoRows, changelog_bad_undo) + one negative control per rule
           (2 review rounds; review added the "done undo audit row but nothing reverted" case and a single-snapshot read)
-  - [ ] Step 7: evidence runs from a clean tree, docs/phase6-results.md, decision records
+  - [x] Step 7: evidence runs from a clean tree, docs/phase6-results.md, decision records
     - [x] 7a: chaos -undo-all newest|random (E4 harness), 2 review rounds (6c5a66c)
     - [x] 7b: evidence R1/R2/E4a/E4b/E4c/E5 run from clean 6c5a66c, docs/phase6-results.md (3 doc review rounds)
     - [x] 7c: decision records 0001-0005 (docs/decisions/; 1 review round, fixes by the lead)
-    - [ ] 7d: interview notes for Phase 6
+    - [x] 7d: interview notes for Phase 6 (docs/interview-notes.md; 1 review round, fixes by the lead)
 
 ## Phase 7: dashboard
 - Small web UI (served by a Go admin API on localhost): event timeline per customer, failed/dead/stale events,

@@ -58,8 +58,11 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   Dev DB reset, no processes running. 7b COMMITTED 7068ef2 and PUSHED with 6c5a66c (2026-11-18); main level with
   origin. 7c (2026-11-18): docs/decisions/0001-0005 written (implementer sonnet), review CHANGES REQUIRED
   (2 blocking: 0001 date, 0003 overclaim/citations; 4 nits on untested deadlock claims) -> fixed by the lead with
-  the reviewer's wording. Options not in the plan are labelled as the author's reasoning. EXACT NEXT STEP: commit 7c
-  (checkpoint B), push (ask), then 7d interview notes (interview-coach, Phase 6 steps 1-7).
+  the reviewer's wording. Options not in the plan are labelled as the author's reasoning. 7c committed f955677 and
+  pushed. 7d (2026-11-18): Phase 6 section in docs/interview-notes.md (interview-coach sonnet), review CHANGES
+  REQUIRED (1 blocking: retries/gave_up paraphrase inverted; changelog_* caveat in the 30-second version; 2 citation
+  nits) -> fixed by the lead. PHASE 6 DONE once 7d is committed. EXACT NEXT STEP: commit 7d (checkpoint B), push
+  (ask), then Phase 7 (dashboard): planner first, user approves the plan.
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
   started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.

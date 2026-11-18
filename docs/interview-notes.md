@@ -214,3 +214,205 @@ worker can't act on an outdated claim. Same scenario afterwards: dead after 8 at
 reason, and the next event processed. The full 20-seed chaos regression still had 0 violations.
 What I'd still flag: the poison event blocks the queue until it dies, and I haven't tested
 fencing with truly concurrent workers yet."
+
+---
+
+## Phase 6: change log, preview, replay, undo, and clean-tree evidence
+
+Sources: `docs/decisions/0001` to `0005` (decisions and tradeoffs), `docs/phase6-results.md`
+(evidence), `docs/phase6-plan.md` (review findings, mutations), `CLAUDE.md` Status (lessons).
+Commits: change log `fe27b99` and `d2e3cf3`; preview `052c0f5`; replay fence `425f62d`; replay
+`dcde809`; undo `14ae77f`; undo checker `b4c9405`; harness `6c5a66c`; evidence `7068ef2`;
+decision records `f955677`. Evidence binaries were built from clean `6c5a66c`
+(`docs/phase6-results.md:8-12`).
+
+### 30-second version
+
+"Phase 5 made event processing crash-safe. Phase 6 gives an operator safe tools on top of it:
+preview what an event would do, replay a dead event, and undo an applied one. All three rest on a
+`change_log` table. The worker writes it in the same transaction as the effect, with before and
+after row images taken from the database. So the log can never disagree with the data.
+
+Preview runs the real apply code inside a transaction that is always rolled back. Replay resets a
+dead or stale event, and I changed the worker's fence token to (replay_count, attempts) so a stalled
+old worker can't sneak past after a reset. Undo restores before-images, but only if every later
+change to those rows is logged and itself undone. Every refusal is audited. I checked it with the
+chaos harness: crash runs, poison runs, and an 'undo everything' property run, all with 0
+violations, against a naive baseline that fails all 20 seeds (RelayGuard runs also carry extra changelog_* checks the
+naive run does not). The limits: undo was never crash-injected or
+run against live concurrent workers, and E4 never replays events."
+
+### Evidence (quoted from `docs/phase6-results.md`; each experiment ran once)
+
+| Run | RESULT line (verbatim) | Line |
+|---|---|---|
+| R1 crash, seeds 1-20 | `failing_seeds=0 violations=0 restarts=257 hard_kills=36` | :99 |
+| R2 poison, seeds 1-5 | `failing_seeds=0 violations=0 restarts=161 hard_kills=20` | :114 |
+| E4a undo-all newest, 1-20 | `violations=0 ... undone=1534 undo_refusals=0 undo_skipped=0` | :177 |
+| E4b undo-all random, 1-20 | `violations=0 ... undone=1530 undo_refusals=814 undo_skipped=0` | :229 |
+| E4c poison + newest, 1-5 | `violations=0 ... undone=383 undo_refusals=0 undo_skipped=0` | :254 |
+| E5 naive crash, 1-20 | `failing_seeds=20 violations=402 restarts=276 hard_kills=12` | :294 |
+
+Comparison caveat (`docs/phase6-results.md:309-315`): RelayGuard runs carry extra `changelog_*`
+checks and use `-lease 1s`. The naive run has neither, so the checks are not identical. RelayGuard
+is held to more checks and still has 0 violations. Restart and hard-kill counts are of different
+processes and are not a measure; violations are.
+
+### Likely interview questions
+
+1. **Why write the change log in the same transaction as the effect?** (decision 0001)
+   If it were a separate step, a crash between "applied" and "logged" would leave a change undo
+   can't see. In one transaction the log commits or rolls back with the effect. The tradeoff is
+   that every write path must call the recorder, and a forgotten path is an unlogged write.
+   Today that is caught by the checker and tests (`TestDBChangeLogCheckDetectsUnloggedWrite`), not
+   by construction. Alternative: database triggers for capture, listed in 0001 as a revisit. Cost
+   of the extra insert: not measured.
+
+2. **Why take images from the database instead of building them in Go?** (0001)
+   `to_jsonb(row)` in the writing statement includes defaults and trigger-set values such as
+   `row_version`. Tradeoff: JSON timestamps depend on the session time zone, so the connection pins
+   UTC. Image comparison relies on that.
+
+3. **Why does preview run the real handler and roll back instead of simulating?** (0005)
+   A simulation is a second copy of the business rules that can drift, and it can't show
+   trigger-set values. Real code plus rollback can't disagree with the real apply. Costs: it takes
+   real locks, consumes sequence values (printed ids of inserts are provisional), and can lose a
+   race with the worker (`ErrBusy`, `ErrChanged`). The file never calls Commit, and
+   `TestPreviewSourceHasNoCommit` enforces that. `TestDBPreviewWritesNothing` snapshots tables.
+
+4. **Why did replay change the fence token? What is the ABA problem?** (0002, commit `425f62d`)
+   Replay resets `attempts` to 0. A worker that claimed with `attempts = 1` and stalled could wake
+   after a replay and a second claim had brought `attempts` back to 1, and pass the newer claim's
+   fence. A counter that resets can repeat a value. Fix: a monotonic `replay_count`, fenced as
+   `(replay_count, attempts)`. It doubles as `change_log.generation`. Proof is targeted tests
+   (`TestDBReplayFencesOldClaim`; the mutation that drops replay_count from the fence fails it),
+   not a chaos run, because chaos runs never replay. Tradeoff: one more column and predicate in
+   the claim, fence and dead-letter statements.
+
+5. **You changed FOR UPDATE to FOR NO KEY UPDATE. Why?** (0001, 0002; plan :96)
+   Foreign keys take FOR KEY SHARE on the parent row. `change_log` and `admin_actions` point at
+   `inbox`, so an admin transaction holds KEY SHARE on the inbox row, and a FOR UPDATE fence would
+   queue behind it. FOR NO KEY UPDATE still excludes other claims, fences and replays. The
+   customer-row version of the deadlock was argued by a reviewer, and 0001 says no test reproduces
+   it. `TestDBKeyShareDoesNotBlockClaimOrFence` pins the inbox side; the plan's mutation
+   (claim/fence back to FOR UPDATE) fails it (plan :173).
+
+6. **A weaker lock changes who overlaps whom. What did you re-check?** (0005, plan :200-212)
+   With NO KEY UPDATE, preview (KEY SHARE) no longer queues behind the worker, so it can overlap an
+   apply in progress. I re-checked each "can't happen" race. Preview is bounded by a 2s
+   `lock_timeout` and by `stateMoved`, which re-reads status and replay_count and returns
+   `ErrChanged`. Be honest: freedom from deadlock between preview and a live worker rests on
+   lock-order reasoning, not a test. Preview takes the inbox row first, and the inbox-first order
+   is kept as a guard.
+
+7. **Why rule B for undo and not strict row-version equality?** (0003)
+   The user's first choice was strict row-version. The planner found it makes newest-first undo
+   impossible: the undo is an UPDATE, so the trigger bumps the version, and the next older undo sees
+   a version it doesn't expect (customer v1, invoice v2, undo makes v3, undo of customer expects v1,
+   refused forever). Rule B: an event is undoable only if every later change to its rows is logged
+   and itself undone. Same strictness about unknown writes, but undo's own bump is explained by its
+   log row. Alternative: compensating events. A new forward event would collide with the
+   subscription ordering rule, so I chose delete-and-restore from before-images.
+
+8. **Why audit refusals, and why report an outcome only after commit?** (0004)
+   Refusals are where an operator probes state, and hiding them hides confusion or misuse. The
+   refusal row is written inside the same locked transaction and committed, so it describes the
+   state the decision was based on. A review found that setting `Outcome = refused` before the audit
+   insert committed would let the CLI claim an audit that failed. The CLI now prints nothing if the
+   audit insert or commit fails, and points to `admin log <id>`. Tests:
+   `TestDBReplayRefusalAuditFailureReportsNoOutcome` forces the insert to fail with a trigger.
+   Known edge: dying after commit but before printing leaves the operator with no report.
+
+9. **What does the E4b result of 814 refusals mean? Is that a failure?**
+   No. In E4b, undo is attempted in random order with retries. Each refusal is a legitimate
+   "undo the later event first" or "referenced" answer, and every done event was eventually
+   undone (undone=1530; per-seed undone equals done, `docs/phase6-results.md:189-228`). The refusal
+   count varies run to run because the done/stale split varies under crashes
+   (`docs/phase6-results.md:232-235`, `:334-337`). Compare E4a, newest first: 0 refusals.
+
+10. **Why only claim evidence from a clean tree?**
+    A binary built from a dirty tree records `vcs.modified=true`, so the result can't be tied to
+    a commit. All four binaries for these runs record `vcs.modified=false`, built from `6c5a66c`
+    (`docs/phase6-results.md:19`, `:26-48`, `:338-342`). I also keep the tree clean, since untracked files
+    set the flag too.
+
+### More engineering lessons (short answers)
+
+- **One control per rule.** If two checker rules report the same violation kind, one masks the
+  other, and a test can pass for the wrong rule. Each rule has its own failing control, and a mutation
+  check showed the row_version +1 rule would otherwise mask the image comparison (plan :122).
+- **Check attribution, not just counts.** The checker compares chain, final state and which event
+  wrote each row, not only row counts (0001 consequences).
+- **A test must be able to fail for the claim it makes.** A 40P01 (deadlock) assertion under a 200ms
+  `lock_timeout` could not fail, because the timeout fires before `deadlock_timeout` (1s). The plan
+  states that test does not prove freedom from deadlock (plan :208-209). It proves `ErrBusy` and that
+  the worker still commits.
+- **Re-read state after a failed statement.** After a failed apply the transaction is aborted, so
+  preview rolls back to the savepoint and then re-reads status and replay_count (plan :219-224). A
+  mutation that re-reads without the rollback fails, because the re-read hits the aborted transaction.
+- **Shared constants between a free-text writer and its parser.** The worker writes `last_error`
+  text and the admin reader recognises it, so both use constants in `internal/app/deadletter.go`
+  (`GaveUpPrefix`, `NoResultRecorded`, `DecodePayloadPrefix`) and can't drift (plan :262, :298).
+- **A heuristic warning must not claim more than its signal supports.** A `last_error` starting with
+  "decode payload" gets only a mild "will most likely fail the same way" warning (plan :262).
+- **Repeat tests whose outcome depends on random ordering.** Concurrency-sensitive DB tests were
+  run with `-count=20` (for example `TestDBPreviewWorkerCommitsDuringPreview`, and
+  `TestDBUndoCustomerWaitsForWorkerFK` with no 40P01/23503, plan :353, :381). I could not find a
+  written example of a specific Go map-order bug in the docs, so don't claim one in an interview.
+- **Checker must not panic on corrupt state, and reads one snapshot.** `checkUndoRows` reads events
+  and undo rows in one REPEATABLE READ READ ONLY transaction. Two READ COMMITTED reads let an inbox
+  row commit between them, which gave a nil map entry and a panic (plan :470-471). It also returns
+  an error instead of panicking if an undo row is malformed.
+- **Audit row versus data consistency.** The checker flags a done undo audit row with nothing
+  reverted (`changelog_missing`/`unexpected`), so an audit row that claims an action the data doesn't show is caught.
+
+### Hard follow-up questions
+
+1. **"Did you test concurrent workers?"** No. Fencing tests simulate a stalled claim with a second
+   connection (0002). The chaos harness crashes and restarts a supervised worker, but does not run
+   several at once. The preview-versus-worker overlap and the undo lock order are argued from lock
+   ordering. `TestDBUndoCustomerWaitsForWorkerFK` (-count=20) is the closest test, and
+   `TestDBApplyWritesExistingRowLast` pins the assumption the undo lock-order argument rests on.
+
+2. **"Does the undo evidence cover replays and crashes?"** No. E4 never replays events, so
+   the generation filter in undo-all ordering is covered only by `TestDBUndoAllReplayedGeneration1`.
+   Undo was not crash-injected and not run against live processing
+   (`docs/phase6-results.md:343-349`). The undo-all run is a property check on synthetic seeds,
+   not an operator workflow. Each experiment ran once.
+
+3. **"Is 0 versus 402 a fair comparison?"** Mostly, with caveats. Same seeds and flags, but
+   RelayGuard runs `-lease 1s` and carries extra `changelog_*` checks. The naive run says
+   "Change log check: n/a". Restart and hard-kill counts (257 vs 276, 36 vs 12) are different
+   processes and not a measure. RelayGuard shows 0 provider retries by construction: only its worker
+   was crash-injected, not its receiver. Naive's 592 provider retries and 123 gave up (sum over 20 seeds)
+   include already-applied events whose resends were rejected (`docs/phase6-results.md:323-331`).
+
+### Tradeoffs and limitations to admit openly
+
+- `change_log` has no retention, and undo needs the history. A future column needs a backfill or
+  a checker update (0001).
+- After a chain break the older event can never be undone (by design, 0003). Undo rule 5 scans
+  `credit_grants` and `subscriptions` unindexed while the customer row is locked (plan :421-422).
+  The customer-delete safety check covers only the references in the fixed `referencedBy` map.
+- One mutation is not caught: removing the `break` in the delete-entry loop, because the app never
+  deletes (plan :420).
+- Actor and reason are free text. There is no authentication, so the audit is only as honest as
+  the operator's flags (0004).
+- `bin/worker-phase4.exe` ignores replay_count and must not be used once replays exist (0002).
+- Not measured: change-log write cost, preview latency, audit volume, multi-worker behaviour.
+
+### "Tell me about a bug you found"
+
+"I built undo, and a review found a hole I'd missed. My conflict rules compared the row only with
+the last logged change. Take this sequence: customer created, invoice I1, then someone edits the
+email directly with an outside UPDATE, then invoice I2. I undo I2, which restores an image that
+already contains the outside edit. Then I undo I1, and every check passes, and it silently wipes
+the outside edit. Each later before and after image carries the outside write forward, so a
+comparison at the end can't see it. The fix is a chain check: every link from the event's own entry
+onward must have `before_image == previous after_image`, including row_version, otherwise the
+conflict is `chain_break` and undo refuses. The regression test
+(`TestDBUndoConflictUnloggedWrite`) failed before the fix on the content case
+(`docs/decisions/0003`, plan :399-405). A similar thing happened in review of the evidence: a
+sentence in the results doc said this run was the 'first' with `vcs.modified=false`, which was
+false, because Phase 5 had it for `worker-phase4.exe`. It was corrected to what the Phase 5 doc shows
+(`docs/phase6-results.md:338-341`)."
