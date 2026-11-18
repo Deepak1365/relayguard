@@ -33,6 +33,10 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
     - [x] 6b: harness checker for undo rows (checkUndoRows, changelog_bad_undo) + one negative control per rule
           (2 review rounds; review added the "done undo audit row but nothing reverted" case and a single-snapshot read)
   - [ ] Step 7: evidence runs from a clean tree, docs/phase6-results.md, decision records
+    - [x] 7a: chaos -undo-all newest|random (E4 harness), 2 review rounds (6c5a66c)
+    - [x] 7b: evidence R1/R2/E4a/E4b/E4c/E5 run from clean 6c5a66c, docs/phase6-results.md (3 doc review rounds)
+    - [ ] 7c: decision records 0001-0005
+    - [ ] 7d: interview notes for Phase 6
 
 ## Phase 7: dashboard
 - Small web UI (served by a Go admin API on localhost): event timeline per customer, failed/dead/stale events,

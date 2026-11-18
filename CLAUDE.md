@@ -43,8 +43,24 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
 - Step 7 plan APPROVED 2026-11-13 (all defaults; E4 and E5 INCLUDED; full plan in docs/phase6-plan.md "## Step 7").
   7a (chaos -undo-all newest|random, internal/sim/undoall.go) done: 2 review rounds + nits, APPROVED; 146 top-level DB
   tests; mutations in the plan. Smoke7a (scratchpad, not evidence): crash 1-3, poison 1-2 (dead=2), both also with
-  -undo-all newest (0 refusals), random seed 1 (refusals=39, passes=3), all 0 violations. Next: 7b evidence from a clean
-  tree, 7c decision records 0001-0005, 7d interview notes. Results docs comparing relayguard vs naive must say relayguard runs carry
+  -undo-all newest (0 refusals), random seed 1 (refusals=39, passes=3), all 0 violations. 7a COMMITTED 6c5a66c,
+  NOT pushed (user: push later together with 7b).
+- Handoff (2026-11-14): 7b evidence RUN from clean 6c5a66c (all 4 binaries vcs.modified=false): R1 crash 1-20, R2
+  poison 1-5, E4a undo-all newest 1-20 (undone=1534 refusals=0), E4b random 1-20 (undone=1530 refusals=814), E4c
+  poison+newest 1-5, all 0 violations; E5 naive 1-20: failing_seeds=20 violations=402. UNCOMMITTED, on purpose:
+  docs/phase6-results.md + results/phase6-{relayguard-crash,relayguard-poison,undo-all-newest,undo-all-random,
+  undo-all-poison,naive-crash}.md. Doc review round 1 CHANGES REQUIRED (comparison caveats, E4 framing) -> fixed;
+  round 2 CHANGES REQUIRED (1 blocking: "first vcs.modified=false" was false, Phase 5 had it for worker-phase4.exe;
+  plus wording) -> fixed by the lead; round 3 (2026-11-18) found the same "first" claim still at lines 8 and 336
+  (a superseded Phase 5 E2 main-tree worker also had false, phase5:434) -> fixed by the lead with the reviewer's
+  wording; all other checks (numbers vs 7b_times.txt/RESULT lines, changelog_* caveat, citations) passed. Raw outputs (7b_*.txt, phase6-results.old):
+  C:\Users\adabs\AppData\Local\Temp\claude\bae3b7b563753f5f\8920b4f6-0d4c-4479-8d2e-ad5ca1948b13\scratchpad
+  Dev DB reset, no processes running. 7b COMMITTED 2026-11-18 (user OK), NOT pushed. EXACT NEXT STEP: ask user to
+  push 6c5a66c + 7b; then 7c decision records 0001-0005 (plan section 7c), then 7d interview notes.
+- Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
+- Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
+  started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.
+- Results docs comparing relayguard vs naive must say relayguard runs carry
   extra changelog_* checks. Evidence only from a clean tree (git status empty, so vcs.modified=false). Then interview notes
   for Phase 6 steps 1-6 (lessons listed below, plus 6a/6b: chain check found by review; audit row vs data consistency;
   checker must not panic on corrupt state; single-snapshot reads).
@@ -136,7 +152,8 @@ Handoff (2026-11-12, still relevant below):
   reminder; then update Status, tick ROADMAP, show the diff, and give the user the new-session prompt it contains.
   Threshold override: env RELAYGUARD_HANDOFF_TOKENS.
 - Agent models: planner and reviewer inherit (Opus); implementer, experiment-runner and interview-coach sonnet.
-  The lead may override per call for a hard step (e.g. Opus implementer for concurrency/locking work).
+  The lead overrides to Opus only for real concurrency/locking/correctness design, stating the reason; never for
+  small follow-ups (nits, wording, one test). Small text edits: the lead does them directly, no agent (user, 2026-11-14).
 
 ## Team workflow
 The main session is the lead. It delegates to project subagents in .claude/agents/:
