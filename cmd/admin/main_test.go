@@ -2,12 +2,8 @@ package main
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/Deepak1365/relayguard/internal/admin"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -72,48 +68,8 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
-// Usage errors exit 2 and print the usage, before touching .env or the DB.
+// Usage errors exit 2 and print the usage, before loading settings or the DB.
 // A replay without -reason is one: the audit fields are checked up front.
-// A failed audit insert or commit must not be printed as "refused, audited".
-func TestReplayReportable(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"done", nil, true},
-		{"refused and audited", fmt.Errorf("inbox 1: %w: status done", admin.ErrNotReplayable), true},
-		{"audit failed", fmt.Errorf("audit refusal: %w", errors.New("boom")), false},
-		{"busy", admin.ErrBusy, false},
-		{"invalid", admin.ErrInvalidInput, false},
-	} {
-		if got := replayReportable(c.err); got != c.want {
-			t.Errorf("%s: replayReportable = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// Both undo refusal kinds are audited before Undo returns; nothing else is.
-func TestUndoReportable(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"done", nil, true},
-		{"not undoable", fmt.Errorf("inbox 1: %w: status pending", admin.ErrNotUndoable), true},
-		{"conflict", fmt.Errorf("inbox 1: %w: 1 conflict(s)", admin.ErrConflict), true},
-		{"audit failed", fmt.Errorf("audit refusal: %w", errors.New("boom")), false},
-		{"busy", admin.ErrBusy, false},
-		{"not found", admin.ErrNotFound, false},
-		{"replay refusal", admin.ErrNotReplayable, false},
-	} {
-		if got := undoReportable(c.err); got != c.want {
-			t.Errorf("%s: undoReportable = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
 func TestRunUsageError(t *testing.T) {
 	for _, args := range [][]string{{"nope"}, {"replay", "3", "-actor", "alice"}, {"undo", "3", "-actor", "alice"}} {
 		var out, errOut bytes.Buffer

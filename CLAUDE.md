@@ -61,8 +61,14 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   the reviewer's wording. Options not in the plan are labelled as the author's reasoning. 7c committed f955677 and
   pushed. 7d (2026-11-18): Phase 6 section in docs/interview-notes.md (interview-coach sonnet), review CHANGES
   REQUIRED (1 blocking: retries/gave_up paraphrase inverted; changelog_* caveat in the 30-second version; 2 citation
-  nits) -> fixed by the lead. PHASE 6 DONE once 7d is committed. EXACT NEXT STEP: commit 7d (checkpoint B), push
-  (ask), then Phase 7 (dashboard): planner first, user approves the plan.
+  nits) -> fixed by the lead. PHASE 6 DONE: 7d committed ac5c427 and pushed.
+- Phase 7 (2026-11-18): plan APPROVED (all defaults Q1-Q7), docs/phase7-plan.md. 7a done (implementer sonnet):
+  internal/admin/list.go, Log one-snapshot tx (mutation tx->pool fails TestDBLogIsOneSnapshot), reportable.go moved
+  from cmd/admin. Review r1 CHANGES REQUIRED (unattributed negative controls; cursor id<$1 with MaxInt64) -> fixed,
+  mutations (a)-(d) each fail list_db_test.go:284; r2 APPROVED. 114 TestDB* pass (156 top-level tests in the DB
+  packages, was 146). Do NOT merge the simple-CASE WHEN branches (Postgres rejects WHEN 'a','b'; r2 nit ignored).
+  Docker Desktop lives at %LOCALAPPDATA%\Programs\DockerDesktop (start it if port 5433 refuses).
+  EXACT NEXT STEP: commit 7a (checkpoint B), push (ask), then 7b with a fresh implementer (Opus reviewer for safety).
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
   started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.

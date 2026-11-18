@@ -26,6 +26,7 @@ type LoggedChange struct {
 // AdminAction is one admin_actions row.
 type AdminAction struct {
 	ID        int64
+	InboxID   int64
 	Action    string
 	Actor     string
 	Reason    string
@@ -47,10 +48,27 @@ type LogResult struct {
 }
 
 // Log reads an event's inbox row, all its change_log rows and all admin
-// actions on it. Read-only; it takes no locks.
+// actions on it. Read-only; it takes no locks. All three reads run in one
+// REPEATABLE READ READ ONLY transaction, so they share one snapshot: without
+// it a replay or worker commit between the reads could show a status that
+// disagrees with the change and action rows beside it.
 func Log(ctx context.Context, pool *pgxpool.Pool, inboxID int64) (LogResult, error) {
+	return logEvent(ctx, pool, inboxID, Options{})
+}
+
+// logEvent is Log with the test hook (opts.beforeReread runs after the inbox
+// read and before the other reads, the point where a concurrent commit would
+// show up without the snapshot).
+func logEvent(ctx context.Context, pool *pgxpool.Pool, inboxID int64, opts Options) (LogResult, error) {
 	res := LogResult{InboxID: inboxID}
-	err := pool.QueryRow(ctx, `
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return res, fmt.Errorf("begin log snapshot: %w", err)
+	}
+	// A read-only transaction has nothing to commit; rollback just ends it.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	err = tx.QueryRow(ctx, `
 		SELECT event_id, event_type, status, attempts, COALESCE(last_error, '')
 		FROM inbox WHERE id = $1`, inboxID).
 		Scan(&res.EventID, &res.EventType, &res.Status, &res.Attempts, &res.LastError)
@@ -60,8 +78,11 @@ func Log(ctx context.Context, pool *pgxpool.Pool, inboxID int64) (LogResult, err
 	if err != nil {
 		return res, fmt.Errorf("read inbox: %w", err)
 	}
+	if opts.beforeReread != nil {
+		opts.beforeReread()
+	}
 
-	rows, err := pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT id, generation, source, admin_action_id, seq, created_at,
 		       table_name, row_id, op, before_image::text, after_image::text
 		FROM change_log WHERE inbox_id = $1 ORDER BY id`, inboxID)
@@ -84,8 +105,8 @@ func Log(ctx context.Context, pool *pgxpool.Pool, inboxID int64) (LogResult, err
 		return res, fmt.Errorf("read change_log: %w", err)
 	}
 
-	rows, err = pool.Query(ctx, `
-		SELECT id, action, actor, reason, outcome, detail::text, created_at
+	rows, err = tx.Query(ctx, `
+		SELECT id, inbox_id, action, actor, reason, outcome, detail::text, created_at
 		FROM admin_actions WHERE inbox_id = $1 ORDER BY id`, inboxID)
 	if err != nil {
 		return res, fmt.Errorf("read admin_actions: %w", err)
@@ -93,7 +114,7 @@ func Log(ctx context.Context, pool *pgxpool.Pool, inboxID int64) (LogResult, err
 	defer rows.Close()
 	for rows.Next() {
 		var a AdminAction
-		if err := rows.Scan(&a.ID, &a.Action, &a.Actor, &a.Reason, &a.Outcome, &a.Detail, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.InboxID, &a.Action, &a.Actor, &a.Reason, &a.Outcome, &a.Detail, &a.CreatedAt); err != nil {
 			return res, fmt.Errorf("scan admin_actions: %w", err)
 		}
 		res.Actions = append(res.Actions, a)

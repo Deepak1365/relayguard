@@ -96,20 +96,6 @@ func parseArgs(args []string) (command, error) {
 	return cmd, nil
 }
 
-// replayReportable reports whether a Replay result may be printed as a
-// report: only when it succeeded or the refusal was audited and committed.
-// After any other error no audit row is guaranteed, and "refused, audit
-// action #0" would be false.
-func replayReportable(err error) bool {
-	return err == nil || errors.Is(err, admin.ErrNotReplayable)
-}
-
-// undoReportable is replayReportable for Undo: both refusal kinds
-// (not undoable, conflicts) are audited and committed before they return.
-func undoReportable(err error) bool {
-	return err == nil || errors.Is(err, admin.ErrNotUndoable) || errors.Is(err, admin.ErrConflict)
-}
-
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -158,7 +144,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "replay":
 		res, err := admin.Replay(ctx, pool,
 			admin.ReplayRequest{InboxID: cmd.inboxID, Actor: cmd.actor, Reason: cmd.reason}, admin.Options{})
-		if replayReportable(err) {
+		if admin.ReplayReportable(err) {
 			// Done or refused-and-audited: an audit row exists; show it.
 			fmt.Fprint(stdout, admin.FormatReplay(res))
 		}
@@ -169,7 +155,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "undo":
 		res, err := admin.Undo(ctx, pool,
 			admin.UndoRequest{InboxID: cmd.inboxID, Actor: cmd.actor, Reason: cmd.reason}, admin.Options{})
-		if undoReportable(err) {
+		if admin.UndoReportable(err) {
 			// Done or refused-and-audited: an audit row exists; show it.
 			fmt.Fprint(stdout, admin.FormatUndo(res))
 		}

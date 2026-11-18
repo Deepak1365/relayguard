@@ -43,6 +43,12 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 - Small web UI (served by a Go admin API on localhost): event timeline per customer, failed/dead/stale events,
   preview / replay / undo buttons, audit log.
 - Acceptance: works end to end on fixtures; screenshots/GIF for README; admin API has tests.
+- Status: IN PROGRESS. Approved plan: docs/phase7-plan.md (2026-11-18, Q1-Q7 defaults; 4 steps, one commit each).
+  - [x] 7a: read API (ListEvents/CustomerTimeline/ListUnattributed/ListActions, keyset paging), admin.Log in one
+        REPEATABLE READ READ ONLY snapshot, ReplayReportable/UndoReportable shared with the CLI (2 review rounds)
+  - [ ] 7b: HTTP API + `admin serve` (127.0.0.1:8090, Host allow-list, CrossOriginProtection, error mapping)
+  - [ ] 7c: UI (embedded vanilla JS)
+  - [ ] 7d: evidence from a clean tree, screenshots, docs/phase7-results.md, decision 0006, interview notes
 
 ## Phase 8: CI that re-proves the claims
 - GitHub Actions with a Postgres service: migrations, go test, and a short chaos run (e.g. seeds 1-3 with crashes) on every push.
