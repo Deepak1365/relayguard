@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RelayGuard admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>RelayGuard admin</h1>
+    <nav id="nav">
+      <a href="#/events?status=dead">Dead</a>
+      <a href="#/events?status=stale">Stale</a>
+      <a href="#/events?status=failed">Failing</a>
+      <a href="#/events">All events</a>
+      <a href="#/unattributed">Unattributed</a>
+      <a href="#/actions">Audit log</a>
+      <form id="customer-form">
+        <label for="customer-id">Customer</label>
+        <input id="customer-id" type="text" placeholder="cus_..." autocomplete="off">
+        <button type="submit">Timeline</button>
+      </form>
+    </nav>
+  </header>
+  <main id="app">
+    <noscript>This page needs JavaScript. It has no external dependencies.</noscript>
+  </main>
+</body>
+</html>

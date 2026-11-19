@@ -100,7 +100,33 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   /verify: test ok (11 pkgs), build ok (now also bin/admin.exe), db-test 129 TestDB* pass, chaos seeds 1-3
   `RESULT target=relayguard seeds=3 failing_seeds=0 violations=0 restarts=38 hard_kills=5` (scratchpad, not
   evidence). Note: run reset-data BEFORE db-test after a chaos run (the truncate guard refuses foreign rows).
-  NEXT: checkpoint B commit of 7b (user OK), ask push, then 7c (UI).
+  7b COMMITTED 9cb1405 and PUSHED (main level with origin).
+- Handoff (2026-11-19, session 4): 7c (UI) IMPLEMENTED (sonnet), review r1 APPROVED (Opus, no blocking), all 5 nits
+  FIXED (sonnet): numeric-only #/event ids, "."/".." customer ids refused, el() attribute allow-list (throws) +
+  TestElAttributeAllowList, more banned sinks, actor maxlength 200, paging null guard, nav re-click refresh, Loading...,
+  timeline "newest arrival first". Files (UNCOMMITTED): internal/adminhttp/server.go (M), static.go, static_test.go,
+  static/{index.html,app.js,style.css}. GET /{$} index; GET /static/{name} only the 3 embedded names (explicit
+  content-type map; else JSON no_route 404, a lead decision). adminhttp 27 top-level tests; TestDB* 129 unchanged.
+  vet/gofmt/test ok after the nits; db-test last ran green BEFORE the nits (nits touched only app.js + static_test.go).
+  OPEN acceptance (plan 7c): manual click-through. USER DECISION: the lead AUTOMATES it (headless Edge via the
+  DevTools protocol, driven by a node 24 script in the scratchpad (built-in WebSocket, no deps); not evidence).
+  Plan for it: dev.ps1 build; reset-data; receiver in background; chaos poison run (e.g. -seeds 1 -poison 2 with
+  -supervise bin/worker.exe; it leaves the last seed's ~80 rows incl. dead=2, enough for "Older" paging); stop the
+  receiver; bin/admin.exe serve (default 127.0.0.1:8090) in background; msedge --headless --remote-debugging-port.
+  Steps: dead list -> event; Preview; Replay (actor+reason) -> ok notice + re-read; Replay again -> refusal with
+  action #; Undo a done event (newest for its customer) -> ok; Undo again -> not_undoable; Undo an older event of a
+  customer with newer changes -> conflict list; buttons disabled in flight; "Older" paging; #/event/abc -> Unknown
+  page; check no console errors. UI hooks: buttons "Preview apply (writes nothing)", "Replay", "Undo", "Older";
+  inputs #actor, #reason; notices div.notice.{ok,error,...}. Stop every process by PID; reset-data after.
+  EXACT NEXT STEP: that click-through, then fix anything found (re-review if behaviour changes), /verify (reset-data
+  BEFORE db-test), checkpoint B commit of 7c (user OK), ask push, then 7d (evidence, screenshots, results doc, 0006,
+  interview notes). No agents or project processes running at handoff; Postgres container up.
+- 2026-11-19 (session 5): click-through DONE (scratchpad clickthrough.mjs + ct_run2.txt + shots/, not evidence):
+  29/29 checks pass on chaos seed 1 poison 2 data (86 rows). It found 1 UI bug, fixed by the lead: undoNotice said
+  "event status now <d.status>" but UndoResult.Status is the status BEFORE the undo (showed "now done"); now
+  "was <status>, generation N; event status now undone" (mirrors FormatUndo). Only expected 409/404 network logs,
+  no JS errors. Headless Edge children survive taskkill /T: stop them by PID matched on the edgeprof command line.
+  dev.ps1 test ok; dev DB reset. NEXT: user decides re-review of the one-line fix, then /verify, checkpoint B.
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
   started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.

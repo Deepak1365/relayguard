@@ -48,7 +48,8 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
         REPEATABLE READ READ ONLY snapshot, ReplayReportable/UndoReportable shared with the CLI (2 review rounds)
   - [x] 7b: HTTP API + `admin serve` (127.0.0.1:8090, Host allow-list, CrossOriginProtection, error mapping,
         JSON DTOs; 2 review rounds)
-  - [ ] 7c: UI (embedded vanilla JS)
+  - [x] 7c: UI (embedded vanilla JS; 1 review round + nits; automated headless-Edge click-through found and fixed
+        the undo notice's "status now" label)
   - [ ] 7d: evidence from a clean tree, screenshots, docs/phase7-results.md, decision 0006, interview notes
 
 ## Phase 8: CI that re-proves the claims

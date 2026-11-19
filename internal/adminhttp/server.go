@@ -86,11 +86,9 @@ func Handler(pool *pgxpool.Pool, port string, opts admin.Options, logf func(stri
 	mux.HandleFunc("POST /api/events/{id}/preview", s.preview)
 	mux.HandleFunc("POST /api/events/{id}/replay", s.replay)
 	mux.HandleFunc("POST /api/events/{id}/undo", s.undo)
-	// Placeholder until the static UI (step 7c).
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintln(w, "RelayGuard admin API (UI not built yet)")
-	})
+	// The embedded UI (static.go).
+	mux.HandleFunc("GET /{$}", serveIndex)
+	mux.HandleFunc("GET /static/{name}", serveAsset)
 
 	// Outermost first: headers, Host, cross-origin, content type + body cap.
 	cop := http.NewCrossOriginProtection()
