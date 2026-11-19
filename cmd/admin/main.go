@@ -6,6 +6,8 @@
 //	                           put a dead or stale event back in the queue (audited)
 //	admin undo <inbox-id> -actor <name> -reason "<text>"
 //	                           revert a done event's recorded changes (audited)
+//	admin serve [-addr 127.0.0.1:8090]
+//	                           localhost dashboard API (loopback only, no authentication)
 //
 // Exit codes: 0 when the command completed (for preview: any outcome,
 // including "the apply would fail"; for replay and undo: it was done), 1 when
@@ -24,6 +26,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/Deepak1365/relayguard/internal/admin"
 	"github.com/Deepak1365/relayguard/internal/config"
 	"github.com/Deepak1365/relayguard/internal/db"
@@ -35,7 +39,9 @@ const usage = `usage:
   admin replay <inbox-id> -actor <name> -reason "<text>"
                              replay a dead or stale event (both flags required; audited)
   admin undo <inbox-id> -actor <name> -reason "<text>"
-                             undo a done event's changes, newest first (both flags required; audited)`
+                             undo a done event's changes, newest first (both flags required; audited)
+  admin serve [-addr 127.0.0.1:8090]
+                             serve the dashboard API on loopback (no authentication)`
 
 // command is a parsed command line.
 type command struct {
@@ -100,31 +106,45 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
-	cmd, err := parseArgs(args)
-	if err != nil {
-		fmt.Fprintf(stderr, "admin: %v\n%s\n", err, usage)
-		return 2
-	}
-	// Same as the worker: settings from .env, real environment wins. Values
-	// are never printed.
+// openPool is shared by every command that needs the database. Same as the
+// worker: settings from .env, real environment wins; values are never printed.
+// On failure it prints the reason and returns a nil pool and the exit code.
+func openPool(stderr io.Writer) (*pgxpool.Pool, int) {
 	if err := config.LoadDotEnv(".env"); err != nil {
 		fmt.Fprintf(stderr, "admin: loading .env: %v\n", err)
-		return 1
+		return nil, 1
 	}
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
 		fmt.Fprintln(stderr, "admin: DATABASE_URL is not set")
-		return 1
+		return nil, 1
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pool, err := db.Connect(ctx, url)
 	if err != nil {
 		fmt.Fprintf(stderr, "admin: database: %v\n", err)
-		return 1
+		return nil, 1
+	}
+	return pool, 0
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "serve" {
+		return runServe(args[1:], stderr)
+	}
+	cmd, err := parseArgs(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "admin: %v\n%s\n", err, usage)
+		return 2
+	}
+	pool, code := openPool(stderr)
+	if pool == nil {
+		return code
 	}
 	defer pool.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	switch cmd.name {
 	case "preview":

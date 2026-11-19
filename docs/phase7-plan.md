@@ -102,6 +102,19 @@ and identical to the audit detail's conflicts; ErrBusy 503 by holding a row lock
 Options.LockTimeout (repeat 20x, timing-dependent).
 Acceptance: all pass; full DB test count reported; never run while an experiment is running.
 
+Implementation note (2026-11-18, after review round 1, CHANGES REQUIRED -> fixed):
+- Deviations accepted by the reviewer: unattributed events have their own route (GET /api/events/unattributed)
+  instead of appearing in the timeline; dev.ps1 db-test now includes ./internal/adminhttp/; bind address must be
+  the literal 127.0.0.1:<port> (::1 and `localhost` refused; the Host allow-list still admits localhost:<port>);
+  413 for oversized bodies, 400 for unknown JSON fields or trailing data; preview also requires a JSON content type.
+- 409 changed and 503 busy send the fixed admin.ErrChanged / admin.ErrBusy texts (not the wording in the table
+  above); the wrapped Postgres/apply error is only logged server-side, like 500.
+- Responses use DTOs in internal/adminhttp (snake_case keys, change images and audit detail as embedded JSON,
+  empty lists as []); internal/admin and the CLI are unchanged. Mux 404/405 bodies are JSON too: code no_route
+  ("no such route") and method_not_allowed, so a UI can tell a missing route from a missing event (not_found).
+  Review round 2 APPROVED (2026-11-19); its should-fix (a handler 404 must survive jsonErrors) is pinned by
+  TestDBNotFound404 checking code and message.
+
 ### 7c: UI (implementer sonnet)
 Files: internal/adminhttp/static/{index.html,app.js,style.css}.
 Views: failed/dead/stale lists, customer timeline, event detail (log), audit log, preview/replay/undo with

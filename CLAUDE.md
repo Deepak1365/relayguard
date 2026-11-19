@@ -68,7 +68,39 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   mutations (a)-(d) each fail list_db_test.go:284; r2 APPROVED. 114 TestDB* pass (156 top-level tests in the DB
   packages, was 146). Do NOT merge the simple-CASE WHEN branches (Postgres rejects WHEN 'a','b'; r2 nit ignored).
   Docker Desktop lives at %LOCALAPPDATA%\Programs\DockerDesktop (start it if port 5433 refuses).
-  EXACT NEXT STEP: commit 7a (checkpoint B), push (ask), then 7b with a fresh implementer (Opus reviewer for safety).
+  7a COMMITTED 3c525e5 and PUSHED (main level with origin). /verify before the commit: test ok (10 pkgs), build ok,
+  chaos seeds 1-3 crash smoke `RESULT target=relayguard seeds=3 failing_seeds=0 violations=0 restarts=38 hard_kills=5`
+  (scratchpad, not evidence); receiver stopped, reset-data done.
+- Handoff (2026-11-18, session 2): 7b (HTTP API + `admin serve`) IMPLEMENTED by a sonnet implementer, NOT yet
+  reviewed, NOT committed. Its report (verified by it; vet, gofmt, test, db-test, build ok; reset-data run):
+  files internal/adminhttp/{server,handlers,errors}.go + addr_test.go + handlers_db_test.go; cmd/admin/serve.go +
+  serve_test.go (main.go only dispatches); dev.ps1 db-test now includes ./internal/adminhttp/ (not in the plan).
+  Routes as the plan; unattributed = GET /api/events/unattributed (separate route); GET / is a text placeholder.
+  Tests: TestParseAddr, TestSecurityHeadersOnEveryResponse, TestParseServeArgs, TestDBReplayOK,
+  TestDBReplayRefusedIsAudited, TestDBInvalidInput400NoAudit, TestDBNotFound404, TestDBGetOnPostRoute405,
+  TestDBCrossSitePost403, TestDBWrongHost403, TestDBWrongContentType415, TestDBBodyTooLarge413, TestDBUndoConflict409,
+  TestDBPreviewAndReads, TestDBBusy503 (-count=20: 20/20), TestDBInternalErrorNotLeaked. Counts (reviewer-verified): 171 top-level / 127 TestDB*
+  across the 5 DB packages incl. internal/adminhttp (worker 26, dbtest 7, sim 56, admin 67, adminhttp 15 of which 13 TestDB*).
+  Mutations (each restored): no Host check -> addr_test.go:60 + handlers_db_test.go:260; no CrossOriginProtection ->
+  :234; no content-type check -> :284; result always returned -> :422 and :461.
+  Implementer decisions for the reviewer to judge: only literal 127.0.0.1:<port> accepted (::1 and `localhost`
+  refused as bind addresses); 413 for oversized bodies, 400 for unknown JSON fields; preview requires JSON content type
+  though it reads no body; admin result structs have no JSON tags (Go field names like InboxID, Conflicts; Conflict
+  fields snake_case) -> consider adding json tags (in 7b fix round or 7c) so the UI gets consistent keys; ErrChanged
+  message may include wrapped apply error text (check against "500 does not leak" intent).
+  Handoff (2026-11-18, session 3): review r1 CHANGES REQUIRED (1 blocking: untested not_undoable/undone/changed
+  mappings; should-fix: raw pg text in 409 changed/503 busy, JSON shape -> DTOs; 5 nits) -> ALL FIXED by a sonnet
+  implementer (dto.go, errors_test.go, TestDBUndoTwiceAndPreviewUndone, TestDBWireKeysOnRealResponses; 8 mutations
+  each fail a named test; 129 TestDB* pass: worker 24, dbtest 7, sim 31, admin 52, adminhttp 15; adminhttp 21 top-level).
+  Lead added the 7b implementation note in docs/phase7-plan.md.
+- 2026-11-19: review r2 APPROVED (all r1 findings fixed; reviewer re-ran 2 mutations). Its should-fix done by the lead:
+  mux 404 code is now no_route (handler 404 stays not_found), TestDBNotFound404 checks code+message (mutation
+  "jsonErrors ignores Content-Type" fails it at handlers_db_test.go:208). Open r2 nits for 7c: a mounted FileServer's
+  plain-text 404s will become JSON no_route (decide deliberately); rawJSON maps invalid JSON to null silently.
+  /verify: test ok (11 pkgs), build ok (now also bin/admin.exe), db-test 129 TestDB* pass, chaos seeds 1-3
+  `RESULT target=relayguard seeds=3 failing_seeds=0 violations=0 restarts=38 hard_kills=5` (scratchpad, not
+  evidence). Note: run reset-data BEFORE db-test after a chaos run (the truncate guard refuses foreign rows).
+  NEXT: checkpoint B commit of 7b (user OK), ask push, then 7c (UI).
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
   started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.

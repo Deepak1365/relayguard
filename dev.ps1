@@ -59,7 +59,7 @@ switch ($Task) {
         $env:RELAYGUARD_DB_TESTS = "1"
         # -p 1: the packages share the same tables, so they must not run in
         # parallel or one package's TRUNCATE wipes another's rows mid-test.
-        go test -count=1 -p 1 -v ./cmd/worker/ ./internal/dbtest/ ./internal/sim/ ./internal/admin/
+        go test -count=1 -p 1 -v ./cmd/worker/ ./internal/dbtest/ ./internal/sim/ ./internal/admin/ ./internal/adminhttp/
         exit $LASTEXITCODE
     }
     "build" {
