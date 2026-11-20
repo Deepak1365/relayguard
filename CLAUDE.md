@@ -178,9 +178,20 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   2026-11-20 (session 7): ALL of the above APPLIED by the lead (dup-key fail + dup-field.txt, read -a, expected>=1,
   5 `usage` self-test cases, stop step also polls port 8080). Self-test 20/20; mutation "drop the violations dup
   check" -> dup-field case BAD. /verify: test ok (11 pkgs), build ok; chaos skipped (no .go change since 0b42f07).
-  NEXT: checkpoint B commit (user OK) -> push (user OK) -> watch main run
-  (both jobs green; R1/R2 clean, N1 violations) -> red proofs ci-red/8b-app (app mutation, R1 red) and
-  ci-red/8b-checker (CheckState no-op: R1 green, N1 red), push/delete each with user OK -> 8c.
+  8b COMMITTED b20348a and PUSHED. CI runs (raw facts for 8c; logs in scratchpad run_8b_{main,app,checker}.log of
+  session 7, not evidence): main b20348a run 44766247687 success (test 15:44:13Z->15:44:58Z, 129 TestDB* PASS,
+  0 SKIP; chaos 15:44:13Z->15:45:22Z): R1 `RESULT target=relayguard seeds=3 failing_seeds=0 violations=0
+  restarts=35 hard_kills=4`, R2 `RESULT target=relayguard seeds=1 failing_seeds=0 violations=0 restarts=28
+  hard_kills=2` (dead=2 done=80 stale=4), N1 `RESULT target=naive seeds=3 failing_seeds=3 violations=60 restarts=35
+  hard_kills=1`, all GATE PASS. ci-red/8b-app 9b2a718 (credits := AmountPaid/100*2) run 44774125059 failure, both
+  jobs: R1 `RESULT target=relayguard seeds=3 failing_seeds=3 violations=144 restarts=33 hard_kills=3` + GATE FAIL
+  (clean) exit 1; test job 31 top-level TestDB* FAIL. ci-red/8b-checker eb06742 (CheckState returns nil, 0, nil)
+  run 44774125003 failure, chaos only: R1/R2 green (R1 restarts=32 hard_kills=2), N1 `RESULT target=naive seeds=3
+  failing_seeds=0 violations=0 restarts=35 hard_kills=1` + `GATE FAIL (violations): chaos exit code was 0, expected
+  1`; test job GREEN. FINDING: no Go test calls CheckState/checkState, so a no-op checker passes all unit/DB tests;
+  only N1 catches it (record in 8c results + 0007; whether to add a DB test is the user's call). Both branches
+  DELETED (user OK 2026-11-20). ROADMAP 8b ticked.
+  NEXT: 8c (README badge, docs/phase8-results.md, decision 0007, interview notes).
   Watch tip: `gh run list --commit <sha>` may be empty right after push; retry before `gh run watch`.
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it

@@ -59,7 +59,8 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 - Status: IN PROGRESS. Approved plan: docs/phase8-plan.md (2026-11-19, Q1-Q10 defaults; steps 8a-8c, one commit each).
   - [x] 8a: test job with Postgres 17 service, DB tests, skip guard, SHA pins (0ca60ff; main run green, red proofs
         ci-red/8a-db red at Go tests, ci-red/8a-skip red at Skip guard)
-  - [ ] 8b: chaos job (crash 1-3, poison 1, naive negative control) + gate script with self-test (red proofs)
+  - [x] 8b: chaos job (crash 1-3, poison 1, naive negative control) + gate script with self-test (b20348a; main run
+        green, red proofs ci-red/8b-app red at R1, ci-red/8b-checker red at N1)
   - [ ] 8c: README badge, docs/phase8-results.md, decision 0007, interview notes
 
 ## Phase 9: transactional outbox for side effects
