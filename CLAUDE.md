@@ -126,7 +126,28 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   "event status now <d.status>" but UndoResult.Status is the status BEFORE the undo (showed "now done"); now
   "was <status>, generation N; event status now undone" (mirrors FormatUndo). Only expected 409/404 network logs,
   no JS errors. Headless Edge children survive taskkill /T: stop them by PID matched on the edgeprof command line.
-  dev.ps1 test ok; dev DB reset. NEXT: user decides re-review of the one-line fix, then /verify, checkpoint B.
+  dev.ps1 test ok; dev DB reset. User skipped a re-review of that fix. /verify ok (11 pkgs, build, chaos 1-3
+  `RESULT target=relayguard seeds=3 failing_seeds=0 violations=0 restarts=34 hard_kills=4`, 129 TestDB*).
+  7c COMMITTED 0b42f07 and PUSHED (main level with origin).
+- Handoff (2026-11-19, session 5): 7d IN PROGRESS, all UNCOMMITTED (on purpose, checkpoint B pending):
+  evidence run (experiment-runner sonnet) from clean 0b42f07 (admin/worker/receiver vcs.modified=false):
+  results/phase7-dashboard-smoke.md, docs/phase7-results.md, docs/img/dashboard-*.png (7). All plan-7d expectations
+  met; poison dead in 11.7971117 s with WORKER_LEASE=1s (one run). Evidence review r1 CHANGES REQUIRED (unrecorded
+  console 404 claim, lease context, limitations, loop not shown, wording) -> fixed by the lead; r2 APPROVED, its 2
+  nits fixed. Deviations (in the doc): curl.exe not Invoke-RestMethod (PS 5.1 throws on 4xx); screenshots via CDP.
+  DONE, NOT reviewed (implementer sonnet, docs only): docs/decisions/0006-dashboard-localhost-security.md (new) and
+  README.md "Admin dashboard (Phase 7)" section between Quick start and Layout (+ Layout line `dashboard/ React UI`
+  replaced by internal/adminhttp/). Implementer's uncited claims for the reviewer: 0006 Consequences cites mutation
+  results only from CLAUDE.md Status (labelled; maybe cut); README says admin serve needs DATABASE_URL in .env and
+  dev.ps1 build makes bin/admin.exe (true: verified this session); README nav labels not checked against app.js.
+  2026-11-19 (session 6): 0006+README review CHANGES REQUIRED (1 blocking: Consequences overclaimed "each layer has
+  a test" + mutation claim cited only CLAUDE.md -> cut) -> all fixed by the lead with the reviewer's wording; README
+  status line updated now (phases 1-7). Interview notes Phase 7 (interview-coach sonnet) review CHANGES REQUIRED
+  (1 blocking: same "each layer" overclaim; added Q10 audit-id-never-committed) -> fixed by the lead. ROADMAP 7d
+  ticked, Phase 7 DONE. Open code nits for Final polish: server.go:34 comment says actor <= 100 (code/UI: 200);
+  addr_test.go:50 case name "placeholder 200" is stale.
+  EXACT NEXT STEP: checkpoint B commit of 7d (user OK), ask push, then Phase 8 (CI) planning.
+  No project processes running; dev DB reset.
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
   started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.

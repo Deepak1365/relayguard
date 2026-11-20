@@ -416,3 +416,150 @@ conflict is `chain_break` and undo refuses. The regression test
 sentence in the results doc said this run was the 'first' with `vcs.modified=false`, which was
 false, because Phase 5 had it for `worker-phase4.exe`. It was corrected to what the Phase 5 doc shows
 (`docs/phase6-results.md:338-341`)."
+
+---
+
+## Phase 7: local admin dashboard (read API, HTTP admin API, embedded UI)
+
+Sources: `docs/phase7-plan.md` (decisions Q1-Q7 at :141-149, safety at :49-63),
+`docs/decisions/0006-dashboard-localhost-security.md`, `docs/phase7-results.md` and
+`results/phase7-dashboard-smoke.md` (evidence), and the code cited inline. Commits: read API
+`3c525e5`; HTTP API and `admin serve` `9cb1405`; UI `0b42f07`. The evidence run used binaries
+from clean `0b42f07` (`docs/phase7-results.md:3`, `:9-10`). The decision record 0006 and the
+evidence docs are committed with this section (Phase 7 step 7d).
+
+### 30-second version
+
+"Phase 6 gave operators replay and undo as a CLI. Phase 7 puts a small dashboard on top: lists of
+failed and dead events, a customer timeline, an event log, and buttons for preview, replay and
+undo. It is a Go HTTP API (`admin serve`) plus a vanilla-JS page embedded in the binary. It calls
+the same audited admin functions as the CLI, so there is no second implementation of replay or undo.
+
+The interesting part is security. There is no login, so the threat is not the network, it is the
+operator's own browser: any web page can make it send requests to localhost, and DNS rebinding can
+make a hostile page look same-origin. So the server binds only 127.0.0.1, checks the Host header,
+uses Go's cross-origin protection, accepts only JSON POSTs, caps bodies, and sets CSP and nosniff.
+The bind, Host, cross-origin, content-type and body-limit layers each have a handler-level test that
+pairs refused requests with an allowed control; the detached-context behaviour has no test. The evidence is one scripted run
+on five synthetic fixture events, not a load or security test, and `actor` is self-declared."
+
+### Evidence (from `docs/phase7-results.md`; one run, synthetic fixtures)
+
+- Binaries from clean `0b42f07`, `vcs.modified=false` (`phase7-results.md:9-10`).
+- Preview of the dead event: HTTP 200, outcome "skip", zero change_log and admin_actions rows (`:32`).
+- Replay of a done event: HTTP 409 `not_replayable`, audited as action #1 (`:33`).
+- Undo of #5 worked; a second undo was 409 `not_undoable`, audited (`:34-35`). Undo of #1 was 409
+  `conflict` with 3 conflicts, audited, state unchanged (`:36`).
+- Poison event reached dead in 11.7971117 s with `WORKER_LEASE=1s`, one run. With the default 10 s
+  lease it would be much longer and that was not measured (`:21-25`).
+- Limitations stated there: one run, 5 inbox rows, one operator; the worker was stopped before
+  `admin serve`; "not a load, concurrency or security test" (`:47-50`). Screenshots show fixture data (`:41`).
+
+### Likely interview questions
+
+1. **It only listens on localhost, so why all the web security?** (0006:6-12)
+   Localhost stops other machines, not other tabs. Any site can make the browser send a request to
+   `127.0.0.1` (CSRF), and a hostile name that resolves to 127.0.0.1 makes the attacker's page
+   same-origin (DNS rebinding). So the layers are: literal `127.0.0.1:<port>` bind, Host allow-list,
+   `CrossOriginProtection`, JSON-only POST, 16 KiB body cap with strict decoding, CSP and nosniff
+   (0006:33-59). Tests are handler-level with a control request each, not a browser experiment (0006:72-75, :78-80).
+
+2. **Why check Host if you already check Origin?** (plan :52-53; 0006:29-30, :40-42)
+   After a rebind the attacker's page is same-origin, so Origin or Sec-Fetch-Site looks fine. The
+   Host header still carries the attacker's hostname, so an allow-list of `127.0.0.1:<port>` and
+   `localhost:<port>` refuses it, for GETs too. `TestDBWrongHost403` covers a wrong name, wrong port,
+   no port, empty and a suffix trick, with allowed controls (`handlers_db_test.go:260`).
+
+3. **Why is preview a POST if it changes nothing?** (Q6, plan :57, :148)
+   It takes row locks (it runs the real apply and rolls back), and browsers can prefetch GETs. A
+   prefetch must not take locks on production rows. Being a POST also puts it behind the same
+   cross-origin and content-type layers. It is not audited (plan :57).
+
+4. **Why keyset paging and not OFFSET?** (`internal/admin/list.go:4-6`, `:91-94`, `:174`)
+   The worker moves rows between statuses while someone pages. With OFFSET the pages shift under the
+   reader. Keyset uses `id < $1` with the last id as cursor, so a page boundary is stable. Each list
+   is one statement, so one page is one snapshot. Cost: ordering is by id only, and no expression
+   index was added for the timeline (Q3, plan :145); it is only to be added if measured slow.
+
+5. **What is the "one snapshot" fix in `admin.Log`?** (`internal/admin/log.go:50-54`, plan Q5 :147)
+   `Log` makes three reads: inbox row, change log, audit actions. Between them a replay or worker
+   commit could show a status that disagrees with the rows beside it. They now run in one
+   REPEATABLE READ READ ONLY transaction. `TestDBLogIsOneSnapshot` commits a real replay between the
+   reads and expects the old snapshot (`list_db_test.go:359-383`).
+
+6. **What do errors look like to the client, and why DTOs?** (`dto.go:3-8`; plan :110-114)
+   Stable codes such as `not_replayable`, `not_undoable`, `conflict`, `no_route`. 409 changed and 503
+   busy send fixed texts; the wrapped Postgres or apply error is only logged, like 500 (plan :110-111;
+   `TestFailHidesWrappedDetail`, `errors_test.go:51`). The admin result structs have no JSON tags, so
+   encoding them directly would give Go field names, base64 images and double-encoded text. DTOs fix
+   snake_case keys in one place; `TestDBWireKeysOnRealResponses` checks keys on real responses
+   (`handlers_db_test.go:511`), so the wire format is a tested contract.
+
+7. **What happens if the browser disconnects mid-undo?** (`handlers.go:15-20`; plan :58-60)
+   The admin call runs on `context.WithoutCancel(r.Context())` plus a 30 s timeout, so a closed tab
+   cannot cancel a replay or undo half way. The UI re-reads the event log after an error (plan :59-60).
+   Admit it: 0006 says no test exercises a client disconnect (0006:67-69).
+
+8. **How does the UI avoid XSS from payloads?** (0006:64-66; `static_test.go:94`, `:107`)
+   Payloads, actor, reason and errors are rendered with `textContent` through one `el()` helper that
+   has an attribute allow-list and throws on anything else. `TestUISourceHasNoMarkupOrCodeSinks`
+   scans the source for banned sinks and `TestElAttributeAllowList` pins the helper. CSP is the
+   second line of defence.
+
+9. **Why no auth, and why no SPA framework?** (0006:15-17, :23-26, :76-77)
+   For one operator on one machine a token adds secret handling without stopping a local process
+   that can already read it (author's reasoning in 0006, not in the plan). Authentication is out of
+   scope in the plan (:63-64). A framework adds a build step for six views (also author's reasoning);
+   the plan chose embedded plain HTML/JS (plan :25). Before exposing it beyond localhost: per-user
+   authentication, TLS, a configured Host list, a CSRF/CORS re-review, a rate limit, and an
+   append-only audit table (author's reasoning, 0006:84-87).
+
+10. **How do you avoid showing an audit id that was never committed?** (`internal/admin/replay.go:115-119`, `:178-192`; `reportable.go:5-18`)
+   The audit insert's `RETURNING id` fills `ActionID` before the commit, so the id exists in memory
+   even if the commit then fails. `Outcome` is set only after the commit succeeds (replay.go:178-179,
+   :192). Only success and the audited refusals (`ErrNotReplayable`; `ErrNotUndoable` and `ErrConflict`
+   for undo) count as reportable. `ReplayReportable` and `UndoReportable` are shared by the CLI and the
+   HTTP API (`cmd/admin/main.go:167`, `:178`; `internal/adminhttp/handlers.go:206`, `:226`). For any
+   other error the handler drops the result body (`errors.go:117-119`), so the UI never sees an
+   `action_id`. Tests: `TestDBBusy503` and `TestDBInternalErrorNotLeaked` assert that the error response
+   carries no result (`handlers_db_test.go:430`, `:474`). After a commit error the commit may still
+   have succeeded, so the operator checks `admin log <id>` (replay.go:118-119).
+
+### Tradeoffs and limitations to admit openly
+
+- No authentication: anyone with a shell or browser on this machine can read everything and replay
+  or undo. `actor` is self-declared, so the audit is only as honest as what was typed (0006:76-77).
+- No penetration test and no browser-based rebinding experiment; the security tests are
+  handler-level (0006:78-80). The evidence is one run on 5 synthetic events, no read or action ran
+  during worker activity (`phase7-results.md:49-50`).
+- The detached-context behaviour has no test (0006:67-69).
+- Bind is stricter than planned: `::1` and other 127.x addresses are refused, which may surprise an
+  IPv6-only setup (0006:81-83, plan :107-109).
+- A source scan for banned sinks is a heuristic, not a proof (author's reasoning); CSP is the backstop (0006:66).
+- The console showed a 404 whose URL was not recorded; a missing favicon is a plausible but
+  unverified cause (`phase7-results.md:44-45`).
+- Before exposing it beyond localhost (author's reasoning, 0006:84-87): real per-user authentication,
+  TLS, a Host list from configuration, a CSRF/CORS re-review, a rate limit, an audit table the writing
+  role cannot alter.
+
+### "Tell me about a bug you found"
+
+"I automated a click-through of the UI with headless Edge, driving it over the DevTools protocol.
+It found a real bug. After a successful undo the notice said the event status was 'now' the old
+value, for example 'now done'. The cause was a semantics mismatch: the API's `UndoResult.Status` is
+the inbox status before the undo (`internal/admin/undo.go:73`), and the UI printed it as the current
+status. The fix prints 'was <status>, generation N; event status now undone', matching the CLI's
+`FormatUndo` (`internal/adminhttp/static/app.js:316-321`, comment at :318). Lesson: a field name
+that is true in one layer can mislead in another, and rendering real responses in a real browser
+catches that where unit tests did not." Note for honesty: the click-through notes were in a scratch
+area and are not evidence; the 7c commit message (`0b42f07`) records "29 checks, not evidence". The committed trace is that commit message,
+the code comment and the fixed text.
+
+### What I'd do next
+
+- Real authentication with per-user identities, then an audit table the writing role cannot change
+  (0006:84-87).
+- A test for client disconnect during undo, and a browser-based rebinding check.
+- Measure the timeline query before adding an index (Q3).
+- Run the dashboard against live workers, since the evidence run stopped the worker first
+  (`phase7-results.md:49-50`).
