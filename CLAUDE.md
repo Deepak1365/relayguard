@@ -146,8 +146,10 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   (1 blocking: same "each layer" overclaim; added Q10 audit-id-never-committed) -> fixed by the lead. ROADMAP 7d
   ticked, Phase 7 DONE. Open code nits for Final polish: server.go:34 comment says actor <= 100 (code/UI: 200);
   addr_test.go:50 case name "placeholder 200" is stale.
-  EXACT NEXT STEP: checkpoint B commit of 7d (user OK), ask push, then Phase 8 (CI) planning.
-  No project processes running; dev DB reset.
+  7d COMMITTED 192baae and PUSHED. PHASE 7 DONE.
+- Phase 8 (2026-11-19): plan APPROVED (all defaults Q1-Q10), docs/phase8-plan.md. Existing ci.yml was green but
+  skipped every TestDB* (no RELAYGUARD_DB_TESTS). GitHub checked: repo PUBLIC, Actions enabled, workflow
+  permissions read. 8a (test job + Postgres) started with an implementer (sonnet).
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
   started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.

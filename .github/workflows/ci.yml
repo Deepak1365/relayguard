@@ -1,14 +1,86 @@
 name: ci
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Read-only token: nothing in this workflow needs to write to the repo.
+permissions:
+  contents: read
+
+# Other branches: a newer push cancels the older run. Main: each commit gets its
+# own group (keyed by SHA), so no main run is cancelled or replaced while queued
+# and every commit on main keeps its own result.
+concurrency:
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # A cap, not a measurement: a hung test must not hold a runner for hours.
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: relayguard
+          POSTGRES_PASSWORD: relayguard
+          POSTGRES_DB: relayguard
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U relayguard -d relayguard"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Throwaway container credentials, same as .env.example. Not a secret.
+      DATABASE_URL: postgres://relayguard:relayguard@localhost:5433/relayguard?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Secret scan (no committed .env, no whsec_ tokens)
         run: bash scripts/secret-scan.sh
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+      - name: gofmt
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$files"
+            exit 1
+          fi
       - run: go vet ./...
-      - run: go test ./...
+      - name: Migrate
+        run: |
+          go run ./cmd/migrate up
+          go run ./cmd/migrate status
+      - name: Go tests (including DB tests)
+        run: |
+          set -o pipefail
+          mkdir -p ci-out
+          RELAYGUARD_DB_TESTS=1 go test -count=1 -p 1 -v ./... 2>&1 | tee ci-out/go-test.log
+      # Without this, a lost RELAYGUARD_DB_TESTS=1 makes every TestDB* skip and the
+      # job stays green while checking nothing. Runs only after the tests passed.
+      - name: Skip guard (DB tests really ran)
+        run: |
+          if grep -qF 'set RELAYGUARD_DB_TESTS=1 and DATABASE_URL to run database tests (they truncate tables)' ci-out/go-test.log; then
+            echo "DB tests were skipped (dbtest skip message found in the log)."
+            exit 1
+          fi
+          if ! grep -q -e '--- PASS: TestDB' ci-out/go-test.log; then
+            echo "No '--- PASS: TestDB' line in the log: DB tests did not run."
+            exit 1
+          fi
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-out
+          path: ci-out/
+          # A failure before the test step (e.g. Migrate) leaves no log; that is fine.
+          if-no-files-found: ignore
+          retention-days: 14
