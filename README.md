@@ -1,11 +1,19 @@
 # RelayGuard
 
+[![ci](https://github.com/Deepak1365/relayguard/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Deepak1365/relayguard/actions/workflows/ci.yml?query=branch%3Amain)
+
 Crash-safe processing for inbound webhooks: each event's effect is applied exactly once,
 even through crashes, duplicates, and out-of-order delivery.
 
-> Status: phases 1-7 done (naive baseline, inbox + transactional worker, ordering, chaos harness with crashes,
-> lease + dead-lettering, audited replay/undo, local admin dashboard). Measured results, each with date, command
-> and commit: docs/phase2-results.md to docs/phase7-results.md (phase 1 has no results file).
+> Status: phases 1-8 done (naive baseline, inbox + transactional worker, ordering, chaos harness with crashes,
+> lease + dead-lettering, audited replay/undo, local admin dashboard, CI with a naive negative control). Measured
+> results, each with date, command and commit: docs/phase2-results.md to docs/phase7-results.md (phase 1 has no
+> results file); CI proof runs: docs/phase8-results.md (a regression signal, not measured evidence).
+>
+> CI (.github/workflows/ci.yml) re-checks on every push: gofmt, vet and all Go tests including the DB tests against
+> Postgres 17, then short chaos runs (crash seeds 1-3 and a poison seed must report 0 violations; the naive receiver
+> must still report violations, so a blind checker cannot keep CI green). A regression signal on GitHub-hosted
+> runners, not evidence: CI counts go in no results table (docs/phase8-results.md).
 
 ## Quick start (Windows PowerShell)
 

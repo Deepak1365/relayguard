@@ -563,3 +563,150 @@ the code comment and the fixed text.
 - Measure the timeline query before adding an index (Q3).
 - Run the dashboard against live workers, since the evidence run stopped the worker first
   (`phase7-results.md:49-50`).
+
+---
+
+## Phase 8: CI that re-checks the claims
+
+Sources: `docs/phase8-results.md` (8 CI runs; read with `gh` on 2026-11-20, `:3`),
+`docs/decisions/0007-ci.md`, `docs/phase8-plan.md`, `.github/workflows/ci.yml`,
+`scripts/ci-chaos-gate.sh`, `scripts/ci-chaos-gate-test.sh`, `internal/sim/check_db_test.go`.
+Commits: 8a `0ca60ff`, 8b `b20348a`, CheckState test `446218e`. Commit-message claims are labelled as
+such. The numbers below are CI numbers: a regression signal, not evidence.
+
+### 30-second version
+
+"Phases 1-7 produced evidence that I ran by hand on my machine. Phase 8 puts a version of those
+checks in GitHub Actions so a later commit cannot quietly break them. The `test` job runs every Go
+test with the Postgres tests switched on. The `chaos` job runs the crash and poison experiments
+against RelayGuard, which must come out clean, and the same experiment against the deliberately
+naive receiver, which must still report violations.
+
+The point of the work was making sure green means something. The old workflow was green while,
+as far as I can tell, every database test was skipped. So there is a guard for skips, a gate script
+that reads the chaos RESULT line instead of trusting the exit code, and a negative control. Each guard
+was shown to go red on a throwaway branch. That is how I found that nothing tested the checker itself.
+Caveats: CI is a regression signal, not evidence: it runs on different hardware and a different Go
+version from my local evidence, a green chaos run is one sample, and the naive run does not carry the `changelog_*` checks that the RelayGuard
+runs do, so those two are not like-for-like."
+
+### Evidence (from `docs/phase8-results.md`; CI runs, a regression signal, not evidence)
+
+- Before Phase 8: run 44654164320 on `192baae` was green. `go test` ran without `-v` and without a
+  database, so its log shows no skip lines. The skip is inferred from the workflow and from
+  `internal/dbtest/dbtest.go:74` (`results:65-71`).
+- 8a green, `0ca60ff`: 129 top-level `TestDB*` pass, 0 FAIL, 0 SKIP (`results:103`).
+- Red proof 8a-skip: with `RELAYGUARD_DB_TESTS=1` removed, the "Go tests" step stayed green with 121
+  top-level tests skipped (149 `--- SKIP` lines counting subtests) and only the "Skip guard" step went
+  red (`results:167-172`).
+- Red proof 8a-db: with `CrossOriginProtection` removed, `TestDBCrossSitePost403` failed, 128 pass and
+  1 FAIL (`results:124-138`).
+- 8b green, `b20348a` (`results:202-207`): R1 `RESULT target=relayguard seeds=3 failing_seeds=0
+  violations=0 restarts=35 hard_kills=4`; R2 `seeds=1 ... violations=0`; N1 `RESULT target=naive
+  seeds=3 failing_seeds=3 violations=60`; all three gates PASS. (N1 vs R1 is not like-for-like: only the
+  RelayGuard runs carry `changelog_*` checks, `results:17-18`.)
+- Red proof 8b-app (doubled credit): R1 `failing_seeds=3 violations=144`, GATE FAIL; the test job also
+  went red with 31 failing top-level `TestDB*` (`results:246`, `:261-262`).
+- Red proof 8b-checker (`CheckState` returns `nil, 0, nil`): test job green with 129 pass, R1 and R2
+  green, N1 `violations=0` and `GATE FAIL (violations): chaos exit code was 0, expected 1`
+  (`results:284`, `:289-294`).
+- After the fix, `446218e`: 130 `TestDB*` pass, both jobs green (`results:313`). N1 gave
+  `violations=62` there, versus 60 earlier (`results:327`, `:336-337`).
+- Largest job was 69 s against a 1200 s timeout cap (`results:342`).
+- Stated limits: runner `ubuntu-24.04`, Go 1.26.0 from `go.mod`, local runs used go1.27.4; kill timing is
+  wall-clock; counts go in no results table (`results:11-15`). The branches are deleted and the runs
+  are only in Actions history (`results:19-20`).
+
+### Likely interview questions
+
+1. **Your CI was green before. What did Phase 8 change?** (`results:65-71`; 0007:10-13)
+   The workflow ran `go test ./...` with no database and no `RELAYGUARD_DB_TESTS`, so every `TestDB*`
+   skipped itself (`dbtest.go:73-75`). I should be careful: that is inferred, because that run had no
+   `-v` and its log has no skip lines. Now the `test` job has a Postgres 17 service, sets the flag, runs
+   `-v`, and a guard step fails if the skip message appears or no `--- PASS: TestDB` line does
+   (`ci.yml:61-77`).
+
+2. **Why a guard script for skips? Doesn't a skipped test show up?** (`results:168-172`, `:341`)
+   It looks green. In red proof 8a-skip the test step concluded success with 121 skipped top-level tests. Also, 8
+   top-level `TestDB*` showed PASS in that run: they are table-driven parents whose subtests all
+   skipped, and Go reports such a parent as PASS. So the guard greps for the skip message and not only
+   for a PASS line. Lesson: count what ran, not what did not fail.
+
+3. **Why not just fail CI on the chaos exit code?** (`ci-chaos-gate.sh:5-8`; 0007:14-16, :20)
+   `chaos` exits 1 both for "violations found" and for `log.Fatal` (bad flag, missing secret, DB down).
+   For the naive control exit 1 is the expected result, so exit 1 alone cannot tell "the checker saw
+   the flaws" from "nothing ran". The gate also requires exactly one `RESULT target=<t>` line, the
+   expected `seeds=`, and `failing_seeds=0 violations=0` (or `violations >= 1` for naive)
+   (`ci-chaos-gate.sh:10-14`, `:43-46`, `:67-75`). I rejected adding an `-expect` flag to `chaos`
+   because it would change the exit-code meaning earlier results docs rely on (0007:21-22).
+
+4. **How do you know the gate itself works?** (`ci-chaos-gate-test.sh:2-4`, `:27`; `ci.yml:120-122`)
+   It has a self-test run as the chaos job's first step, on canned logs in `scripts/testdata/ci-gate/`.
+   Those logs are SYNTHETIC, and the script checks each starts with a `SYNTHETIC` line. Every failure
+   case is asserted too, because a gate that cannot fail proves nothing. One case, a repeated
+   `violations=` field where the last value would win, is rejected too: the gate fails on duplicate
+   keys (`ci-chaos-gate.sh:49-60`; case at `ci-chaos-gate-test.sh:44`; also stated in the b20348a
+   commit message).
+
+5. **Why run the naive receiver in CI at all?** (0007:38-39; `ci.yml:168-170`)
+   It is a negative control. If the checker were broken and always reported 0 violations, R1 and R2
+   would stay green. N1 must report violations, so a blind checker turns it red. `cmd/naive` is unchanged.
+
+6. **What did the red proofs show?** (0007:40-42; `results:19-20`)
+   Each guard was made to fail on a throwaway `ci-red/*` branch: 8a-db and 8a-skip for the test job,
+   8b-app and 8b-checker for the chaos job. They were pushed, then deleted with my OK, and never merged.
+   Only the red run shows a guard can fail; a green run does not. The mutated lines are quoted in the
+   results doc because the commits are unreachable and may be garbage-collected.
+
+7. **Why can't you compare the CI numbers to your local results?** (`results:11-15`, `:336-337`)
+   Different OS and Go version (GitHub `ubuntu-24.04` and go1.26.0, versus Windows and go1.27.4 locally),
+   and the supervisor's kill timing is wall-clock. Across the three runs where R1 was green, restarts
+   were 35, 32, 32 and hard_kills 4, 2, 2. So CI only asks "still clean, and the checker still sees the
+   naive flaws". Also, N1 versus R1 is not like-for-like: the RelayGuard runs carry extra `changelog_*`
+   checks and the naive run does not (`results:17-18`, `:222-223`).
+
+8. **Is a green chaos run proof that there are no bugs?** (`results:16`; 0007:54-55)
+   No. It is one sample of a randomized, timing-dependent run, with 3 crash seeds and 1 poison seed
+   (0007:35-37). Failures are investigated and recorded, not retried until green (0007:27-29).
+
+### Tradeoffs and limitations to admit openly
+
+- CI numbers are a regression signal, not evidence, and not comparable to local runs (`results:11-15`).
+- No `-race` in CI (plan Q7, `phase8-plan.md:147`), no Dependabot, so the SHA-pinned actions go stale
+  until I bump them by hand (plan Q6, `:147`; 0007:58).
+- Undo-all property runs (E4 from Phase 6) are not in CI; only crash seeds 1-3, poison seed 1 and
+  naive seeds 1-3 are (plan Q4, `:146`; 0007:58-59).
+- `TestDBCheckStateRules` was not re-run as a CI red proof. Reading the test, it calls the exported
+  `CheckState` (`check_db_test.go:127`), so the 8b-checker break should fail it. The `446218e` commit
+  message says six checker mutations each fail it; those were local runs, not recorded in a results
+  doc (`results:331-332`; 0007:47-52).
+- Linux-only CI: a failure there would be a portability finding, not noise (0007:56-57).
+- The "before" skip is inferred, not displayed in its log (`results:68-71`).
+- The self-test uses synthetic logs, so it shows the gate logic works, not that real chaos output
+  always has the shape the gate expects. The gate did parse the real RESULT lines in the 4 runs that
+  had a chaos job (`results` sections 5-8), but that is a sample, not a guarantee.
+
+### "Tell me about a bug you found"
+
+"Phase 8 had a gap, found by deliberately breaking things. To check my chaos gate I made a throwaway
+branch where `sim.CheckState`, the model check every chaos run ends with, returns `nil, 0, nil`. The
+`test` job stayed green with 129 database tests passing, and R1 and R2 stayed green, because a checker
+that reports nothing looks exactly like a correct system. Only the naive negative control went red: it
+reported `violations=0` and the gate failed with 'chaos exit code was 0, expected 1'
+(`results:284`, `:289-294`). The cause was that no Go test called `CheckState`, so the thing I relied on to
+check correctness was itself untested (header comment, `check_db_test.go:3-10`). I added
+`TestDBCheckStateRules`: each case changes either the stored rows or the expected state, asserts the
+exact violations, and sits next to a clean positive control, so both a silent checker and an
+everything-is-wrong checker fail (`check_db_test.go:6-10`). Honest status: I did not push a new red
+proof to confirm CI now fails under that mutation; I checked it by reading that the test calls the
+exported function; the `446218e` commit message also reports six local checker mutations failing it,
+which is not recorded in a results doc (`results:331-332`).
+Lesson: the negative control was worth its cost in that one run, and a check that cannot fail is the
+first thing to test."
+
+### What I'd do next
+
+- Push a red proof for `TestDBCheckStateRules` so the fix is shown in CI, not only argued.
+- Add Dependabot or a scheduled bump for the SHA pins (0007:58).
+- Consider `-race` and the undo-all property run if job time allows (0007:58-59).
+- Keep the CI-versus-local caveat in any future table; do not mix the numbers.

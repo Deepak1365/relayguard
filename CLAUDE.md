@@ -191,7 +191,14 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   1`; test job GREEN. FINDING: no Go test calls CheckState/checkState, so a no-op checker passes all unit/DB tests;
   only N1 catches it (record in 8c results + 0007; whether to add a DB test is the user's call). Both branches
   DELETED (user OK 2026-11-20). ROADMAP 8b ticked.
-  NEXT: 8c (README badge, docs/phase8-results.md, decision 0007, interview notes).
+  446218e (TestDBCheckStateRules, closes the 8b-checker gap; 130 TestDB*; CI run 44782779433 green) committed and
+  pushed. 2026-11-20 (session 8): 8c docs (sonnet drafts) reviewed: results+0007+README r1 CHANGES REQUIRED (2 blocking:
+  wrong DB-package timing range, 0007 CLAUDE.md-only citation; red-proof mutations now quoted verbatim from
+  `git show`) -> fixed by the lead, r2 APPROVED; interview notes Phase 8 r1 CHANGES REQUIRED (121 vs 149 SKIP,
+  "proves" wording, coach-session leakage) -> fixed, r2 one fix ("4 runs with a chaos job") -> APPROVED. Raw CI
+  logs: scratchpad of session 2996b1f6-... (run_<id>.log, meta_<id>.json). ROADMAP 8c ticked. PHASE 8 DONE once
+  the 8c commit lands. Open: optional CI red proof for TestDBCheckStateRules (interview notes "What I'd do next").
+  NEXT: Phase 9 (transactional outbox) needs a plan (planner) and user approval.
   Watch tip: `gh run list --commit <sha>` may be empty right after push; retry before `gh run watch`.
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it

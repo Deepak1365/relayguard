@@ -56,12 +56,15 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 ## Phase 8: CI that re-proves the claims
 - GitHub Actions with a Postgres service: migrations, go test, and a short chaos run (e.g. seeds 1-3 with crashes) on every push.
 - Acceptance: green badge in README; CI fails if the harness reports any violation.
-- Status: IN PROGRESS. Approved plan: docs/phase8-plan.md (2026-11-19, Q1-Q10 defaults; steps 8a-8c, one commit each).
+- Status: DONE (2026-11-20). Approved plan: docs/phase8-plan.md (2026-11-19, Q1-Q10 defaults; steps 8a-8c, one commit each).
+  Evidence (a regression signal, not measured evidence): docs/phase8-results.md; decision: docs/decisions/0007-ci.md.
   - [x] 8a: test job with Postgres 17 service, DB tests, skip guard, SHA pins (0ca60ff; main run green, red proofs
         ci-red/8a-db red at Go tests, ci-red/8a-skip red at Skip guard)
   - [x] 8b: chaos job (crash 1-3, poison 1, naive negative control) + gate script with self-test (b20348a; main run
         green, red proofs ci-red/8b-app red at R1, ci-red/8b-checker red at N1)
-  - [ ] 8c: README badge, docs/phase8-results.md, decision 0007, interview notes
+  - [x] 8c: README badge, docs/phase8-results.md (8 CI runs, verbatim), decision 0007, interview notes
+        (results+0007+README 2 review rounds; interview notes 2 review rounds; fixes by the lead). Gap found by
+        8b-checker closed by 446218e (TestDBCheckStateRules; not re-run as a CI red proof)
 
 ## Phase 9: transactional outbox for side effects
 - Emails / external calls recorded in an outbox table in the same transaction, sent by a relay with idempotency keys.
