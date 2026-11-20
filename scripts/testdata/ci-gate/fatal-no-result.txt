@@ -1,0 +1,2 @@
+SYNTHETIC test data for scripts/ci-chaos-gate-test.sh, not a real run
+2026/01/01 00:00:00 STRIPE_WEBHOOK_SECRET is not set

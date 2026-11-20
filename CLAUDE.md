@@ -149,7 +149,39 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   7d COMMITTED 192baae and PUSHED. PHASE 7 DONE.
 - Phase 8 (2026-11-19): plan APPROVED (all defaults Q1-Q10), docs/phase8-plan.md. Existing ci.yml was green but
   skipped every TestDB* (no RELAYGUARD_DB_TESTS). GitHub checked: repo PUBLIC, Actions enabled, workflow
-  permissions read. 8a (test job + Postgres) started with an implementer (sonnet).
+  permissions read. 8a review r1 APPROVED (should-fix: per-SHA concurrency group on main). /verify ok (11 pkgs,
+  build; chaos skipped: no .go change since 0b42f07). 8a COMMITTED 0ca60ff and PUSHED. CI runs (raw facts for 8c's
+  phase8-results.md; logs in scratchpad run_8a*.log, not evidence):
+  main 0ca60ff run 44674527638 success, job 04:27:35Z->04:28:43Z, 6 migrations OK, 11 pkgs ok, 129 TestDB* PASS,
+  0 SKIP (gh log shows 131 "--- PASS: TestDB" matches: 2 are the guard script's own source echoed);
+  ci-red/8a-db 8e2c0e7 run 44676583712 failure at "Go tests": handlers_db_test.go:243 status 200, want 403,
+  --- FAIL: TestDBCrossSitePost403; ci-red/8a-skip 737c9db run 44676583762 failure at "Skip guard" ("DB tests were
+  skipped (dbtest skip message found in the log)."), Go tests step green. Branches not merged; both DELETED (user
+  OK 2026-11-20; runs stay in Actions history). User gets GitHub failure emails for red-proof runs: expected,
+  nothing to "resolve" (explained to the user).
+- Handoff (2026-11-20, session 6): 8b IMPLEMENTED (sonnet), NOT reviewed, NOT committed. Files (UNCOMMITTED):
+  .github/workflows/ci.yml (new `chaos` job; `test` unchanged), scripts/ci-chaos-gate.sh,
+  scripts/ci-chaos-gate-test.sh (14 cases, passes in Git Bash), scripts/testdata/ci-gate/*.txt (7 SYNTHETIC logs;
+  .txt because .gitignore ignores *.log). Also uncommitted on purpose (go with the 8b commit): CLAUDE.md Status,
+  docs/ROADMAP.md (8a ticked). Implementer notes for the reviewer: committed results/phase6-*.md hold no RESULT
+  line (gate was checked against RESULT lines rebuilt from their numbers, scratchpad rg.log/nv.log); receiver stop
+  via PID file + kill -0 poll; no -timeout flag (default 3 min/seed); gate parses key=value by name; chaos job
+  steps: checkout, setup-go, gate self-test, migrate, secret, build, start receiver, R1, R2, stop receiver, N1, upload.
+  8b review r1 APPROVED (Opus; workflow, PIPESTATUS, receiver across steps, masking, SHAs, N1 ordering all ok).
+  TO APPLY (should-fix): (1) scripts/ci-chaos-gate.sh:49-55 repeated keys: last value wins (`violations=5 ...
+  violations=0` passes clean) -> in each case arm fail if already set, e.g. `seeds=*) [ -z "$seeds" ] || fail
+  "duplicate seeds= field"; seeds=${field#seeds=} ;;` (same for failing_seeds, violations) + canned dup-field.txt
+  self-test case; (2) :49 unquoted `for field in $lines` glob-expands -> `read -r -a fields <<< "$lines"; for field
+  in "${fields[@]}"`. Nits: :32 require expected_seeds >= 1 (exit 2); self-test `expect usage` cases (non-numeric
+  exit_code/expected_seeds -> exit 2); optional: stop-receiver step polls until 8080 is free
+  (`! (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null`). Small: lead or a sonnet implementer; rerun the self-test.
+  2026-11-20 (session 7): ALL of the above APPLIED by the lead (dup-key fail + dup-field.txt, read -a, expected>=1,
+  5 `usage` self-test cases, stop step also polls port 8080). Self-test 20/20; mutation "drop the violations dup
+  check" -> dup-field case BAD. /verify: test ok (11 pkgs), build ok; chaos skipped (no .go change since 0b42f07).
+  NEXT: checkpoint B commit (user OK) -> push (user OK) -> watch main run
+  (both jobs green; R1/R2 clean, N1 violations) -> red proofs ci-red/8b-app (app mutation, R1 red) and
+  ci-red/8b-checker (CheckState no-op: R1 green, N1 red), push/delete each with user OK -> 8c.
+  Watch tip: `gh run list --commit <sha>` may be empty right after push; retry before `gh run watch`.
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
   started (it said it was the only python.exe). Told the user. Brief runners: never kill by image name.

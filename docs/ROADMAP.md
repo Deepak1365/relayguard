@@ -57,7 +57,8 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 - GitHub Actions with a Postgres service: migrations, go test, and a short chaos run (e.g. seeds 1-3 with crashes) on every push.
 - Acceptance: green badge in README; CI fails if the harness reports any violation.
 - Status: IN PROGRESS. Approved plan: docs/phase8-plan.md (2026-11-19, Q1-Q10 defaults; steps 8a-8c, one commit each).
-  - [ ] 8a: test job with Postgres 17 service, DB tests, skip guard, SHA pins (red proofs ci-red/8a-db, 8a-skip)
+  - [x] 8a: test job with Postgres 17 service, DB tests, skip guard, SHA pins (0ca60ff; main run green, red proofs
+        ci-red/8a-db red at Go tests, ci-red/8a-skip red at Skip guard)
   - [ ] 8b: chaos job (crash 1-3, poison 1, naive negative control) + gate script with self-test (red proofs)
   - [ ] 8c: README badge, docs/phase8-results.md, decision 0007, interview notes
 

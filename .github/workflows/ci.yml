@@ -84,3 +84,102 @@ jobs:
           # A failure before the test step (e.g. Migrate) leaves no log; that is fine.
           if-no-files-found: ignore
           retention-days: 14
+
+  # Re-runs the crash and poison chaos experiments against real Postgres on every
+  # push, plus a negative control (the naive receiver) that must still be caught.
+  # A regression signal, not evidence: hosted hardware and wall-clock kill timing
+  # mean its counts are not comparable to the committed results/.
+  chaos:
+    runs-on: ubuntu-24.04
+    # A cap, not a measurement: chaos itself caps each seed at 3 minutes.
+    timeout-minutes: 20
+    # Its own database: chaos Reset truncates the same tables as the DB tests, so
+    # sharing the `test` job's container would let the two jobs wipe each other.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: relayguard
+          POSTGRES_PASSWORD: relayguard
+          POSTGRES_DB: relayguard
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U relayguard -d relayguard"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Throwaway container credentials, same as .env.example. Not a secret.
+      DATABASE_URL: postgres://relayguard:relayguard@localhost:5433/relayguard?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      # The gate must prove it can fail before it is trusted to judge a run.
+      - name: Gate self-test
+        run: bash scripts/ci-chaos-gate-test.sh
+      - name: Migrate
+        run: go run ./cmd/migrate up
+      # Per-run random secret: never a real one, nothing stored in GitHub secrets.
+      # Masked in logs; receiver and chaos inherit it through GITHUB_ENV.
+      - name: Generate webhook secret
+        run: |
+          s="whsec_ci_$(openssl rand -hex 24)"
+          echo "::add-mask::$s"
+          echo "STRIPE_WEBHOOK_SECRET=$s" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          mkdir -p bin ci-out
+          for name in receiver worker naive chaos; do
+            go build -o "bin/$name" "./cmd/$name"
+          done
+      - name: Start RelayGuard receiver
+        run: |
+          nohup ./bin/receiver > ci-out/receiver.log 2>&1 &
+          echo $! > ci-out/receiver.pid
+      - name: R1 crash run (RelayGuard, must be clean)
+        run: |
+          set +e
+          ./bin/chaos -target relayguard -seeds 1-3 -dup 0.2 -reorder 10 -supervise bin/worker -crash-rate 0.1 -kill-interval 2s -lease 1s -out ci-out/relayguard-crash.md 2>&1 | tee ci-out/relayguard-crash.log
+          code=${PIPESTATUS[0]}
+          bash scripts/ci-chaos-gate.sh clean 3 "$code" ci-out/relayguard-crash.log
+      - name: R2 poison run (RelayGuard, must be clean)
+        run: |
+          set +e
+          ./bin/chaos -target relayguard -seeds 1 -poison 2 -dup 0.2 -reorder 10 -supervise bin/worker -crash-rate 0.1 -kill-interval 2s -lease 1s -out ci-out/relayguard-poison.md 2>&1 | tee ci-out/relayguard-poison.log
+          code=${PIPESTATUS[0]}
+          bash scripts/ci-chaos-gate.sh clean 1 "$code" ci-out/relayguard-poison.log
+      # Both receivers use port 8080, so the RelayGuard one must be gone first.
+      - name: Stop RelayGuard receiver
+        run: |
+          pid="$(cat ci-out/receiver.pid)"
+          kill "$pid"
+          # Wait until the process is gone AND port 8080 refuses connections.
+          for _ in $(seq 1 20); do
+            if ! kill -0 "$pid" 2>/dev/null && ! (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "receiver $pid did not stop or port 8080 is still in use"
+          exit 1
+      # Negative control: the checker must still see the naive receiver's flaws,
+      # or a checker that always reports 0 violations would keep this job green.
+      - name: N1 negative control (naive, must report violations)
+        run: |
+          set +e
+          ./bin/chaos -target naive -seeds 1-3 -dup 0.2 -reorder 10 -supervise bin/naive -crash-rate 0.1 -kill-interval 2s -out ci-out/naive-crash.md 2>&1 | tee ci-out/naive-crash.log
+          code=${PIPESTATUS[0]}
+          bash scripts/ci-chaos-gate.sh violations 3 "$code" ci-out/naive-crash.log
+      - name: Upload chaos output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chaos-out
+          path: |
+            ci-out/
+            bin/supervised.log
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,5 @@
+SYNTHETIC test data for scripts/ci-chaos-gate-test.sh, not a real run
+target=naive seeds=1-3 customers=20 dup=0.20 reorder=10 poison=0 crash-rate=0.10 kill-interval=2s supervise="bin/naive"
+---
+RESULT target=naive seeds=3 failing_seeds=3 violations=71 restarts=30 hard_kills=3
+wrote ci-out/naive-crash.md
