@@ -17,6 +17,7 @@ import (
 
 	"github.com/Deepak1365/relayguard/internal/app"
 	"github.com/Deepak1365/relayguard/internal/changelog"
+	"github.com/Deepak1365/relayguard/internal/outbox"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -165,7 +166,8 @@ func Preview(ctx context.Context, pool *pgxpool.Pool, inboxID int64, opts Option
 	if err != nil {
 		return res, fmt.Errorf("savepoint: %w", err)
 	}
-	applyErr := app.Apply(ctx, sp, changelog.NewApply(inboxID, res.Generation), evt, app.Hooks{})
+	applyErr := app.Apply(ctx, sp, changelog.NewApply(inboxID, res.Generation),
+		outbox.NewWriter(inboxID, res.Generation), evt, app.Hooks{})
 	switch {
 	case applyErr == nil:
 		res.Outcome = OutcomeApply

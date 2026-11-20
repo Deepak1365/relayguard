@@ -10,6 +10,7 @@ import (
 
 	"github.com/Deepak1365/relayguard/internal/app"
 	"github.com/Deepak1365/relayguard/internal/changelog"
+	"github.com/Deepak1365/relayguard/internal/outbox"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -56,7 +57,8 @@ func ApplyInbox(t *testing.T, pool *pgxpool.Pool, inboxID int64) string {
 		t.Fatal(err)
 	}
 	status := "done"
-	switch err := app.Apply(ctx, sp, changelog.NewApply(inboxID, generation), evt, app.Hooks{}); {
+	switch err := app.Apply(ctx, sp, changelog.NewApply(inboxID, generation),
+		outbox.NewWriter(inboxID, generation), evt, app.Hooks{}); {
 	case err == nil:
 		if err := sp.Commit(ctx); err != nil {
 			t.Fatal(err)

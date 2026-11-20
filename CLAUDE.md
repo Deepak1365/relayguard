@@ -145,7 +145,9 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   status line updated now (phases 1-7). Interview notes Phase 7 (interview-coach sonnet) review CHANGES REQUIRED
   (1 blocking: same "each layer" overclaim; added Q10 audit-id-never-committed) -> fixed by the lead. ROADMAP 7d
   ticked, Phase 7 DONE. Open code nits for Final polish: server.go:34 comment says actor <= 100 (code/UI: 200);
-  addr_test.go:50 case name "placeholder 200" is stale.
+  addr_test.go:50 case name "placeholder 200" is stale; cmd/chaos/main.go:440 `b.WriteString(line + "\n")`
+  (gopls writestring lint, style only); internal/sim/sim_test.go:152 `PoisonID(5, 0) != PoisonID(5, 0)` (SA4000,
+  intentional determinism check, assign to vars; the assertion is weak by nature).
   7d COMMITTED 192baae and PUSHED. PHASE 7 DONE.
 - Phase 8 (2026-11-19): plan APPROVED (all defaults Q1-Q10), docs/phase8-plan.md. Existing ci.yml was green but
   skipped every TestDB* (no RELAYGUARD_DB_TESTS). GitHub checked: repo PUBLIC, Actions enabled, workflow
@@ -198,7 +200,26 @@ main level with origin. This Status edit is committed with 7a (step 7's first co
   "proves" wording, coach-session leakage) -> fixed, r2 one fix ("4 runs with a chaos job") -> APPROVED. Raw CI
   logs: scratchpad of session 2996b1f6-... (run_<id>.log, meta_<id>.json). ROADMAP 8c ticked. PHASE 8 DONE once
   the 8c commit lands. Open: optional CI red proof for TestDBCheckStateRules (interview notes "What I'd do next").
-  NEXT: Phase 9 (transactional outbox) needs a plan (planner) and user approval.
+  8c COMMITTED 6db7584 and PUSHED; CI run 44824303836 success. PHASE 8 DONE.
+- Phase 9 (2026-11-20, session 8): plan APPROVED (Q2-Q10 defaults; Q1 = yes, gated keyless naive sender, rule-4
+  exception now written in Rule 4), docs/phase9-plan.md (steps 9a-9f, one commit each; 9b implementer OPUS).
+  UNCOMMITTED (on purpose, go with the 9a commit): docs/phase9-plan.md, CLAUDE.md (Status, Rule 4, Final polish
+  nits), docs/ROADMAP.md (Phase 9 status line). No agents or project processes running at handoff.
+  2026-11-20 (session 9): 9a IMPLEMENTED (sonnet): migrations/00007_outbox.sql (applied to dev DB),
+  internal/outbox (Writer, IdempotencyKey rg:stripe:<event_id>:<kind>; Message unused until 9b),
+  internal/dbtest/outbox.go, app.Apply(ctx, tx, rec, out, evt, hooks) at 4 call sites (worker, preview, dbtest,
+  preview_db_test), outbox in the 3 TRUNCATE sites, 12 new DB tests (cmd/worker/outbox_db_test.go + admin/sim).
+  Payloads {to, customer_id} / {to, invoice_id, credits} / {to, subscription_id, status}; to = stored email or null.
+  Review r1 (Opus) APPROVED; should-fix (test rename -> TestDBOutboxNoneOnFailedApply, deviation note in the plan)
+  + nits (worker savepoint comment, Message comment) done by the lead; skipped nits: generation CHECK, outbox unit test.
+  Mutations (each fails a named test): pool not tx -> outbox_db_test.go:229 + preview_db_test.go:620; enqueue before
+  stale decision -> :159 (after strengthening the test); drop outbox_once -> :281; omit outbox from Reset ->
+  reset_db_test.go:44. 142 TestDB* pass (was 130). Smoke (scratchpad, not evidence): crash 1-3 `RESULT
+  target=relayguard seeds=3 failing_seeds=0 violations=0 restarts=38 hard_kills=6`; poison 1 `RESULT
+  target=relayguard seeds=1 failing_seeds=0 violations=0 restarts=28 hard_kills=2` (dead=2 done=81 stale=3).
+  Note: block-env.ps1 hook blocks commands containing ".Env" (e.g. cmd.Env); write such files with Write.
+  EXACT NEXT STEP: commit 9a (with docs/phase9-plan.md, CLAUDE.md, ROADMAP), ask push, then 9b (relay + sink,
+  implementer OPUS) from the plan's 9b section, then Opus review.
   Watch tip: `gh run list --commit <sha>` may be empty right after push; retry before `gh run watch`.
 - Model policy ADOPTED by the user 2026-11-14 (see Token discipline, Agent models). Conserve tokens wherever possible.
 - Incident (2026-11-13): the experiment-runner ran `taskkill /IM python.exe` to kill a stray interactive python it
@@ -279,7 +300,8 @@ Handoff (2026-11-12, still relevant below):
 2. Never touch .env. Never commit secrets.
 3. Never invent, round or "clean up" measured numbers. Results docs contain real outputs, pasted verbatim,
    with date, command and git commit. Label synthetic data as synthetic. Unexpected results are reported, not hidden.
-4. Keep cmd/naive's flaws intact.
+4. Keep cmd/naive's flaws intact. One user-approved exception (2026-11-20, Phase 9 Q1): a keyless inline
+   side-effect send, active only when SINK_URL is set (docs/phase9-plan.md 9d). Nothing else.
 5. Every behaviour change needs a test or a harness experiment that proves it, plus a regression run.
 6. Ask the user before: git push, deleting files, changing migrations that already ran, or anything irreversible.
 7. Explain changes so the user can defend them in an interview: what, why, tradeoffs, alternatives.

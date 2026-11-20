@@ -277,3 +277,22 @@ func TestDBUndoSubscriptionChainAcrossUndoAndReplay(t *testing.T) {
 		t.Fatalf("subscriptions: %d rows after undoing everything, want 0", n)
 	}
 }
+
+// Undo reverts change_log images only. An outbox row is an append-only fact (an
+// email cannot be unsent), so undo must leave it exactly as it was, with no
+// compensating row.
+func TestDBUndoLeavesOutboxUntouched(t *testing.T) {
+	pool := dbtest.Pool(t)
+	id := appliedCustomer(t, pool)
+	before := dbtest.Outbox(t, pool)
+	if len(before) != 1 || before[0].InboxID != id || before[0].Kind != "welcome_email" || before[0].Status != "pending" {
+		t.Fatalf("outbox before undo: %+v, want the one pending welcome email", before)
+	}
+
+	res := mustUndo(t, pool, id)
+	wantUndone(t, pool, id, res)
+	after := dbtest.Outbox(t, pool)
+	if len(after) != 1 || after[0] != before[0] {
+		t.Fatalf("outbox after undo: %+v, want it unchanged: %+v", after, before)
+	}
+}

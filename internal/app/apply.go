@@ -7,6 +7,11 @@
 // the database itself (to_jsonb of the row, read in the writing statement or
 // under a row lock just before it), not rebuilt in Go, so they show exactly
 // what was stored, including defaults and the trigger-maintained row_version.
+//
+// One deliberate exception: side effects (emails, notices) are enqueued in the
+// outbox table (internal/outbox) through the same transaction. Outbox rows are
+// append-only facts, not undoable state, so they are NOT in change_log and
+// undo never touches them: an email cannot be unsent.
 package app
 
 import (
@@ -18,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Deepak1365/relayguard/internal/changelog"
+	"github.com/Deepak1365/relayguard/internal/outbox"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -45,13 +51,19 @@ type Hooks struct {
 
 // Apply performs evt's effect using tx and records each row it writes in rec,
 // through the same tx. The caller owns the transaction and must use a fresh
-// Recorder per apply. If Apply returns an error, the caller must roll tx
-// back: some writes and their log rows may already be in it.
-func Apply(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder, evt stripeevent.Event, hooks Hooks) error {
+// Recorder and a fresh outbox Writer per apply. Messages are enqueued after
+// the branch's last state write, so a stale or failed apply enqueues nothing.
+// If Apply returns an error, the caller must roll tx back: some writes, their
+// log rows and outbox rows may already be in it.
+func Apply(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder, out *outbox.Writer, evt stripeevent.Event, hooks Hooks) error {
 	if rec == nil {
 		// No silent "apply without logging" mode: a write missing from the
 		// log would break the audit trail and later undo.
 		return errors.New("apply: nil change recorder")
+	}
+	if out == nil {
+		// Same reasoning: no silent "apply without its side effects" mode.
+		return errors.New("apply: nil outbox writer")
 	}
 	switch evt.Type {
 	case "customer.created":
@@ -67,15 +79,19 @@ func Apply(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder, evt stripeev
 			c.ID, c.Email).Scan(&id, &after); err != nil {
 			return fmt.Errorf("insert customer: %w", err)
 		}
-		return rec.Record(ctx, tx, changelog.Change{
-			Table: "customers", RowID: id, Op: changelog.OpInsert, After: after})
+		if err := rec.Record(ctx, tx, changelog.Change{
+			Table: "customers", RowID: id, Op: changelog.OpInsert, After: after}); err != nil {
+			return err
+		}
+		return out.Enqueue(ctx, tx, outbox.KindWelcomeEmail, evt.ID, map[string]any{
+			"to": c.Email, "customer_id": c.ID})
 
 	case "invoice.paid":
 		var inv stripeevent.Invoice
 		if err := json.Unmarshal(evt.Data.Object, &inv); err != nil {
 			return fmt.Errorf("decode invoice: %w", err)
 		}
-		customerID, err := lookupCustomer(ctx, tx, inv.Customer)
+		customerID, email, err := lookupCustomer(ctx, tx, inv.Customer)
 		if err != nil {
 			return err
 		}
@@ -102,7 +118,11 @@ func Apply(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder, evt stripeev
 		// Logged even when credits is 0: the row_version trigger bumps the
 		// row on every UPDATE, so an unlogged no-op would break the
 		// "+1 per logged update" chain that undo relies on.
-		return addCredits(ctx, tx, rec, customerID, credits)
+		if err := addCredits(ctx, tx, rec, customerID, credits); err != nil {
+			return err
+		}
+		return out.Enqueue(ctx, tx, outbox.KindReceiptEmail, evt.ID, map[string]any{
+			"to": email, "invoice_id": inv.ID, "credits": credits})
 
 	case "customer.subscription.created",
 		"customer.subscription.updated",
@@ -111,11 +131,11 @@ func Apply(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder, evt stripeev
 		if err := json.Unmarshal(evt.Data.Object, &sub); err != nil {
 			return fmt.Errorf("decode subscription: %w", err)
 		}
-		customerID, err := lookupCustomer(ctx, tx, sub.Customer)
+		customerID, email, err := lookupCustomer(ctx, tx, sub.Customer)
 		if err != nil {
 			return err
 		}
-		return upsertSubscription(ctx, tx, rec, evt, sub, customerID)
+		return upsertSubscription(ctx, tx, rec, out, evt, sub, customerID, email)
 
 	default:
 		return ErrUnhandledType
@@ -155,8 +175,10 @@ func addCredits(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder, custome
 
 // upsertSubscription inserts or (if not stale) updates the subscription and
 // logs what it did.
-func upsertSubscription(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder,
-	evt stripeevent.Event, sub stripeevent.Subscription, customerID int64) error {
+// A notice is enqueued only when the upsert wrote (insert or update); a stale
+// event returns ErrStale below without enqueueing anything.
+func upsertSubscription(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder, out *outbox.Writer,
+	evt stripeevent.Event, sub stripeevent.Subscription, customerID int64, email *string) error {
 	// Pre-read under a row lock: if the row exists, this is the exact before
 	// image the upsert will replace, because nobody else can change it now.
 	// FOR NO KEY UPDATE, like addCredits, for consistency: no table references
@@ -207,13 +229,16 @@ func upsertSubscription(ctx context.Context, tx pgx.Tx, rec *changelog.Recorder,
 	if err != nil {
 		return fmt.Errorf("subscription %s: %w", sub.ID, err)
 	}
-	switch op {
-	case changelog.OpInsert:
-		return rec.Record(ctx, tx, changelog.Change{
-			Table: "subscriptions", RowID: id, Op: changelog.OpInsert, After: after})
-	case changelog.OpUpdate:
-		return rec.Record(ctx, tx, changelog.Change{
-			Table: "subscriptions", RowID: id, Op: changelog.OpUpdate, Before: before, After: after})
+	if op != "" {
+		ch := changelog.Change{Table: "subscriptions", RowID: id, Op: op, After: after}
+		if op == changelog.OpUpdate {
+			ch.Before = before
+		}
+		if err := rec.Record(ctx, tx, ch); err != nil {
+			return err
+		}
+		return out.Enqueue(ctx, tx, outbox.KindSubscriptionNotice, evt.ID, map[string]any{
+			"to": email, "subscription_id": sub.ID, "status": sub.Status})
 	}
 
 	// Stale: nothing was written.
@@ -256,15 +281,18 @@ func classifyUpsert(found, returned, inserted bool) (string, error) {
 	}
 }
 
-func lookupCustomer(ctx context.Context, tx pgx.Tx, stripeID string) (int64, error) {
+// lookupCustomer returns the customer's id and email (nil if Stripe sent
+// null), the latter for the address of outbox messages.
+func lookupCustomer(ctx context.Context, tx pgx.Tx, stripeID string) (int64, *string, error) {
 	var id int64
+	var email *string
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM customers WHERE stripe_customer_id = $1`, stripeID).Scan(&id)
+		`SELECT id, email FROM customers WHERE stripe_customer_id = $1`, stripeID).Scan(&id, &email)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("%w %s", ErrUnknownCustomer, stripeID)
+		return 0, nil, fmt.Errorf("%w %s", ErrUnknownCustomer, stripeID)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("lookup customer: %w", err)
+		return 0, nil, fmt.Errorf("lookup customer: %w", err)
 	}
-	return id, nil
+	return id, email, nil
 }

@@ -37,9 +37,9 @@ import (
 // check can tell them apart from rows a real receiver stored.
 const EventPrefix = "evt_dbtest_"
 
-// truncateSQL lists every table the tests touch. change_log and admin_actions
-// reference inbox, so TRUNCATE inbox without them is refused by Postgres.
-const truncateSQL = `TRUNCATE change_log, admin_actions, inbox, subscriptions, credit_grants, customers RESTART IDENTITY`
+// truncateSQL lists every table the tests touch. change_log, admin_actions and
+// outbox reference inbox, so TRUNCATE inbox without them is refused by Postgres.
+const truncateSQL = `TRUNCATE outbox, change_log, admin_actions, inbox, subscriptions, credit_grants, customers RESTART IDENTITY`
 
 // testLockKey is the pg_advisory_lock key every DB test holds for its whole
 // run. The value is arbitrary ("RGDB" in ASCII); nothing else in RelayGuard

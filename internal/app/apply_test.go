@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Deepak1365/relayguard/internal/changelog"
+	"github.com/Deepak1365/relayguard/internal/outbox"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -40,8 +41,16 @@ func TestClassifyUpsert(t *testing.T) {
 // Apply must refuse to run without a recorder rather than write unlogged
 // rows. It checks before touching tx, so a nil tx is fine here.
 func TestApplyRequiresRecorder(t *testing.T) {
-	err := Apply(context.Background(), nil, nil, stripeevent.Event{Type: "customer.created"}, Hooks{})
+	err := Apply(context.Background(), nil, nil, outbox.NewWriter(1, 0), stripeevent.Event{Type: "customer.created"}, Hooks{})
 	if err == nil {
 		t.Fatal("Apply with a nil recorder: no error, want one")
+	}
+}
+
+// Same for the outbox writer: no silent "apply without its side effects".
+func TestApplyRequiresOutboxWriter(t *testing.T) {
+	err := Apply(context.Background(), nil, changelog.NewApply(1, 0), nil, stripeevent.Event{Type: "customer.created"}, Hooks{})
+	if err == nil {
+		t.Fatal("Apply with a nil outbox writer: no error, want one")
 	}
 }

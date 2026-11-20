@@ -35,6 +35,7 @@ import (
 	"github.com/Deepak1365/relayguard/internal/config"
 	"github.com/Deepak1365/relayguard/internal/db"
 	"github.com/Deepak1365/relayguard/internal/fault"
+	"github.com/Deepak1365/relayguard/internal/outbox"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -250,8 +251,9 @@ func (w *worker) process(ctx context.Context, id int64, tok claimToken) error {
 
 	// Savepoint: if the effect fails, undo only the effect and keep the row
 	// locked so the failure is recorded in the same transaction. The change
-	// log rows are written inside the savepoint too, so they share the
-	// effect's fate: a stale, skipped or failed apply leaves none behind.
+	// log rows and outbox rows are written inside the savepoint too, so they
+	// share the effect's fate: a stale, skipped or failed apply leaves none
+	// behind.
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("savepoint: %w", err)
@@ -260,7 +262,8 @@ func (w *worker) process(ctx context.Context, id int64, tok claimToken) error {
 	// filed under its new generation, so they neither collide with the unique
 	// index nor mix with what an earlier generation logged.
 	rec := changelog.NewApply(id, tok.generation)
-	applyErr := app.Apply(ctx, sp, rec, evt, w.hooks)
+	out := outbox.NewWriter(id, tok.generation)
+	applyErr := app.Apply(ctx, sp, rec, out, evt, w.hooks)
 
 	switch {
 	case applyErr == nil:

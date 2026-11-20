@@ -18,6 +18,7 @@ import (
 	"github.com/Deepak1365/relayguard/internal/app"
 	"github.com/Deepak1365/relayguard/internal/changelog"
 	"github.com/Deepak1365/relayguard/internal/dbtest"
+	"github.com/Deepak1365/relayguard/internal/outbox"
 	"github.com/Deepak1365/relayguard/internal/stripeevent"
 )
 
@@ -395,7 +396,7 @@ func workerMidApply(t *testing.T, pool *pgxpool.Pool, id int64) pgx.Tx {
 		worker.Rollback(ctx)
 		t.Fatal(err)
 	}
-	if err := app.Apply(ctx, worker, changelog.NewApply(id, 0), evt, app.Hooks{}); err != nil {
+	if err := app.Apply(ctx, worker, changelog.NewApply(id, 0), outbox.NewWriter(id, 0), evt, app.Hooks{}); err != nil {
 		worker.Rollback(ctx)
 		t.Fatalf("worker apply: %v", err)
 	}
@@ -590,5 +591,32 @@ func TestDBPreviewUnlistedFailureIsAnError(t *testing.T) {
 	res, err := Preview(context.Background(), pool, dup, Options{})
 	if err == nil || errors.Is(err, ErrBusy) || errors.Is(err, ErrChanged) || res.Outcome != "" {
 		t.Fatalf("duplicate customer.created: %+v, %v; want a plain error and no outcome", res, err)
+	}
+}
+
+// Preview runs the real Apply, which enqueues; the rollback must take the
+// outbox rows with everything else. The outbox is also checked directly
+// because snapshot (above) predates the table.
+func TestDBPreviewLeavesNoOutbox(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := context.Background()
+	// A pending customer.created: previewing it would enqueue a welcome email.
+	cus := dbtest.InsertEvent(t, pool, "adm_obcus", "customer.created", dbtest.CustomerObject(testCustomer))
+	res, err := Preview(ctx, pool, cus, Options{})
+	if err != nil || res.Outcome != OutcomeApply {
+		t.Fatalf("preview: %+v, %v, want apply", res, err)
+	}
+	// Sequences are not transactional: last_value 1 proves the preview
+	// really inserted the row, so an empty table means the rollback removed it.
+	var seq int64
+	var called bool
+	if err := pool.QueryRow(ctx, `SELECT last_value, is_called FROM outbox_id_seq`).Scan(&seq, &called); err != nil {
+		t.Fatal(err)
+	}
+	if !called || seq != 1 {
+		t.Fatalf("outbox_id_seq = %d (called %v), want 1: the preview must have enqueued before rolling back", seq, called)
+	}
+	if rows := dbtest.Outbox(t, pool); len(rows) != 0 {
+		t.Fatalf("preview left outbox rows: %+v", rows)
 	}
 }

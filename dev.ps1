@@ -39,15 +39,15 @@ switch ($Task) {
         Invoke-Sql @("SELECT id, event_id, event_type, status, attempts, left(last_error, 70) AS last_error FROM inbox ORDER BY id;")
     }
     "reset-data" {
-        # change_log and admin_actions reference inbox, so they must go in the
+        # change_log, admin_actions and outbox reference inbox, so they must go in the
         # same TRUNCATE. Wiping the admin audit here is a deliberate choice:
         # its rows point at inbox ids that RESTART IDENTITY reuses.
-        Invoke-Sql @("TRUNCATE change_log, admin_actions, inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")
+        Invoke-Sql @("TRUNCATE outbox, change_log, admin_actions, inbox, subscriptions, credit_grants, customers RESTART IDENTITY;")
     }
     "test"           { go vet ./...; if ($LASTEXITCODE -eq 0) { go test ./... }; exit $LASTEXITCODE }
     "db-test" {
         # DB integration tests against the dev database. They TRUNCATE the
-        # inbox, app, change_log and admin_actions tables (and refuse if the inbox has rows they did not
+        # inbox, app, change_log, admin_actions and outbox tables (and refuse if the inbox has rows they did not
         # create). Uses DATABASE_URL if set, otherwise the non-secret dev URL
         # from .env.example. The URL is never printed.
         # Before running: stop any worker (it polls and could claim the test
@@ -83,9 +83,9 @@ switch ($Task) {
         Write-Host "  send <file> [count]    sign and POST a fixture event"
         Write-Host "  state                  balances, ledger, subscriptions"
         Write-Host "  inbox                  inbox rows: status, attempts, errors"
-        Write-Host "  reset-data             empty app tables, inbox, change_log, admin_actions (keeps schema)"
+        Write-Host "  reset-data             empty app tables, inbox, change_log, admin_actions, outbox (keeps schema)"
         Write-Host "  test                   go vet + go test"
-        Write-Host "  db-test                DB integration tests (TRUNCATES inbox, app, change_log, admin_actions)"
+        Write-Host "  db-test                DB integration tests (TRUNCATES inbox, app, change_log, admin_actions, outbox)"
         Write-Host "  build                  build worker, naive, chaos and admin into bin\"
     }
 }

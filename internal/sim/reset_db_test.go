@@ -27,3 +27,25 @@ func TestDBResetWithChangeLogRows(t *testing.T) {
 		}
 	}
 }
+
+// outbox references inbox too: Reset must name it, or every chaos run fails at
+// its first step once an outbox row exists.
+func TestDBResetWithOutboxRows(t *testing.T) {
+	pool := dbtest.Pool(t)
+	id := dbtest.InsertEvent(t, pool, "sim_reset_ob", "customer.created", dbtest.CustomerObject("cus_dbtest_reset_ob"))
+	if got := dbtest.ApplyInbox(t, pool, id); got != "done" {
+		t.Fatalf("apply: %s", got)
+	}
+	if n := dbtest.Count(t, pool, "outbox"); n != 1 {
+		t.Fatalf("outbox before Reset: %d rows, want 1 (the welcome email)", n)
+	}
+
+	if err := Reset(context.Background(), pool); err != nil {
+		t.Fatalf("Reset with outbox rows present: %v", err)
+	}
+	for _, table := range []string{"outbox", "change_log", "inbox", "customers"} {
+		if n := dbtest.Count(t, pool, table); n != 0 {
+			t.Fatalf("%s after Reset: %d rows, want 0", table, n)
+		}
+	}
+}

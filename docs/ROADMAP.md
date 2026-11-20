@@ -69,6 +69,14 @@ Each phase is done only when its acceptance criteria are met AND the evidence is
 ## Phase 9: transactional outbox for side effects
 - Emails / external calls recorded in an outbox table in the same transaction, sent by a relay with idempotency keys.
 - Acceptance: harness counts side effects at the outbox consumer; 0 duplicates under crashes vs naive.
+  ("0 duplicates" = 0 duplicate effects at a consumer honouring idempotency keys; raw duplicate deliveries are measured.)
+- Status: IN PROGRESS. Approved plan: docs/phase9-plan.md (2026-11-20; Q1 yes = gated keyless naive sender, Q2-Q10 defaults).
+  - [x] 9a: outbox schema (00007) + enqueue in the apply savepoint (1 review round, fixes by the lead)
+  - [ ] 9b: relay (lease, idempotency key, fault points) + synthetic sink
+  - [ ] 9c: harness (-outbox, relay supervisor) + outbox/effect checker
+  - [ ] 9d: gated naive sender (SINK_URL)
+  - [ ] 9e: CI step R3 + red proof ci-red/9e-key
+  - [ ] 9f: evidence O1-O4, N9, results doc, decision 0008, interview notes
 
 ## Phase 10 (stretch): scaling and load
 - Multiple workers (SKIP LOCKED), per-entity ordering under concurrency, throughput and p50/p99 latency with k6 or a Go load generator on stated hardware.
